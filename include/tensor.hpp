@@ -10,6 +10,8 @@
 #include <optional>
 #include <span>
 #include <unordered_set>
+#include <iostream>
+#include <typeinfo>
 
 namespace cppgw {
 // This file specifies the Tensor class, which provides a generic interface for storing arbitrary-rank
@@ -77,6 +79,33 @@ private:
 
   void validate_unique_labels() const { validate_unique_labels(dims_); }
 
+  // Printing
+  void print_data(std::ostream& os, size_t dim, size_t offset) const {
+    const size_t n = dims_[dim].dim;
+
+    os << "[";
+
+    if (dim == 0) {
+      // Innermost displayed dimension.
+      for (size_t i = 0; i < n; ++i) {
+        if (i > 0)
+          os << ", ";
+
+        os << data()[offset + i * strides_[dim]];
+      }
+    } else {
+      for (size_t i = 0; i < n; ++i) {
+        if (i > 0)
+          os << ",\n";
+
+        print_data(os, dim - 1,
+                   offset + i * strides_[dim]);
+      }
+    }
+
+    os << "]";
+  }
+
 public:
   // ----- Construction -----
   // A default-construction Tensor has no dims and no storage, the "not yet allocated" state
@@ -120,7 +149,48 @@ public:
   const scalar_type*    data() const  { return buffer_ ? buffer_->data() : nullptr; }
 
   // ----- Printers -----
-  
+  void print(std::ostream& os = std::cout) const {
+    // Metadata
+    os << "Tensor<"
+      << typeid(scalar_type).name()
+      << ">\n";
+
+    os << "  rank: " << rank() << "\n";
+    os << "  shape: (";
+
+    for (size_t i = 0; i < dims_.size(); ++i) {
+      if (i > 0)
+        os << ", ";
+
+      os << dims_[i].label << "=" << dims_[i].dim;
+    }
+
+    os << ")\n";
+
+    os << "  size: " << total_elements_ << "\n";
+    os << "  allocated: " << std::boolalpha << allocated() << "\n";
+
+    // Data
+    os << "  data:\n";
+
+    if (!allocated()) {
+      os << "<unallocated>\n";
+      return;
+    }
+
+    if (rank() == 0 || total_elements_ == 0) {
+      os << "[]\n";
+      return;
+    }
+
+    //os << "    ";
+    print_data(os, rank() - 1, 0);
+    os << "\n";
+  }
+  friend std::ostream& operator<<(std::ostream& os, const Tensor& tensor) {
+    tensor.print(os);
+    return os;
+  }
 
   // ----- Operations -----
   

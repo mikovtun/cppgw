@@ -32,12 +32,13 @@ int main(int argc, char** argv) {
   matrix1.allocate();
   matrix2.allocate();
   for(int i=0; i<matrix1.total_elements(); i++)
-    *(matrix1.data() + i) = i;
+    *(matrix1.data() + i) = i+1;
   for(int i=0; i<matrix2.total_elements(); i++)
-    *(matrix2.data() + i) = i;
+    *(matrix2.data() + i) = i+1;
+  matrix1.print();
   Tensor<double, Executor::Host> matrix3;
   Tensor<double, Executor::Host>::gemm(matrix1, matrix2, matrix3,
                                         "y", "x");
-  
+  matrix3.print();
   return 0;
 }
