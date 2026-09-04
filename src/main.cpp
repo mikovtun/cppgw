@@ -26,5 +26,18 @@ int main(int argc, char** argv) {
   Tensor<double,Executor::Host>  tensor({{"a",N},{"b", N*3}, {"c", N}});
   Tensor<std::complex<double>, Executor::Host> tensor2(dims);
   std::cout << "Total elements: " << tensor.total_elements() << std::endl;
+  
+  Tensor<double, Executor::Host> matrix1({{"x", 2},{"y", 2}});
+  Tensor<double, Executor::Host> matrix2({{"x", 2},{"y", 2}});
+  matrix1.allocate();
+  matrix2.allocate();
+  for(int i=0; i<matrix1.total_elements(); i++)
+    *(matrix1.data() + i) = i;
+  for(int i=0; i<matrix2.total_elements(); i++)
+    *(matrix2.data() + i) = i;
+  Tensor<double, Executor::Host> matrix3;
+  Tensor<double, Executor::Host>::gemm(matrix1, matrix2, matrix3,
+                                        "y", "x");
+  
   return 0;
 }

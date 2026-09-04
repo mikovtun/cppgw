@@ -1,10 +1,15 @@
 #pragma once
+#include "enums.hpp"
+#include "tensor_buffer.hpp"
+#include "linalgbackend.hpp"
 #include <vector>
 #include <string>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
+#include <optional>
 #include <span>
+#include <unordered_set>
 
 namespace cppgw {
 // This file specifies the Tensor class, which provides a generic interface for storing arbitrary-rank
@@ -18,32 +23,32 @@ namespace cppgw {
 // Design policy:
 // Strides are recomputed every time a modification to dims is made
 
-enum class Executor { Host, Device };
 
-// forward declare Buffer
-//template <Executor E>
-//  class TensorBuffer;
-
+// One named axis of a Tensor
 struct TensorDim {
-  std::string label = "";
+  std::string label;
   size_t      dim = 0;
-  TensorDim(std::string l_, size_t d_) : label(l_), dim(d_) {};
+  TensorDim(std::string l_, size_t d_) : label(std::move(l_)), dim(d_) {};
+  bool operator==(const TensorDim& other) const {
+    return label == other.label && dim == other.dim;
+  }
 };
 
 
-template <typename scalar_type, Executor exec>
+
+
+template <typename scalar_type, typename exec>
 class Tensor {
+  using Buffer  = TensorBuffer<scalar_type, exec>;
+  using Backend = LinAlgBackend<scalar_type, exec>;
 private:
   // Layout information
   std::vector<TensorDim>  dims_;
   std::vector<size_t>     strides_;
   size_t                  total_elements_ = 0;
-  
   // Storage
-  //std::shared_ptr<TensorBuffer<exec>> buffer_;
-public:
+  std::shared_ptr<Buffer> buffer_;
 
-  // Calculates strides based off of dims
   void compute_strides() {
     size_t stride = 1;
     strides_.resize(dims_.size());
@@ -53,19 +58,140 @@ public:
     }
     total_elements_ = stride;
   }
+  
 
-  size_t total_elements() const {
-    return total_elements_;
+  std::optional<size_t> find_label_index(const std::string& label) const {
+    for(size_t i=0; i<dims_.size(); ++i)
+      if(dims_[i].label == label)
+        return i;
+    return std::nullopt;
+  }
+  
+  static void validate_unique_labels(const std::span<TensorDim>& dims) {
+    std::unordered_set<std::string> seen;
+    for (const auto& d : dims) {
+      if (!seen.insert(d.label).second)
+        throw std::invalid_argument("Tensor: duplicate dimension label '" + d.label + "'");
+    }
   }
 
-  // Accept any container of TensorDim
+  void validate_unique_labels() const { validate_unique_labels(dims_); }
+
+public:
+  // ----- Construction -----
+  // A default-construction Tensor has no dims and no storage, the "not yet allocated" state
+  Tensor() = default;
+
+  // Accept any container of TensorDim (vector, array, etc)
   template <typename R>
   explicit Tensor(R&& inputDims) 
-    : dims_(std::begin(inputDims), std::end(inputDims)) { compute_strides(); }
-
-  // Accept brace-enclosed initializer lists
+    : dims_(std::begin(inputDims), std::end(inputDims)) { compute_strides(); allocate(); }
+  // Accept brace-enclosed initializer lists too
   Tensor(std::initializer_list<TensorDim> inputDims) : dims_(inputDims) { compute_strides(); }
 
+  // ----- Layout -----
+  size_t total_elements() const { return total_elements_; }
+  size_t rank() const { return dims_.size(); }
+  const std::vector<TensorDim>& dims() const { return dims_; }
+  const std::vector<size_t>& strides() const { return strides_; }
+
+  bool has_label(const std::string& label) const {
+    return find_label_index(label).has_value();
+  }
+
+  size_t label_index(const std::string& label) const {
+    auto idx = find_label_index(label);
+    if (!idx) {
+      throw std::invalid_argument("Tensor: label '" + label + "' not found.");
+    }
+    return *idx;
+  }
+
+  // ----- Storage -----
+  bool allocated() const { return static_cast<bool>(buffer_); }
+  void allocate() { 
+    // Do not create a buffer object if no dims are in the Tensor
+    if (total_elements_ > 0)
+      buffer_ = std::make_shared<Buffer>(total_elements_);
+  }
+
+  
+  scalar_type*          data()        { return buffer_ ? buffer_->data() : nullptr; }
+  const scalar_type*    data() const  { return buffer_ ? buffer_->data() : nullptr; }
+
+  // ----- Printers -----
+  
+
+  // ----- Operations -----
+  
+  // Contract the last dimension of X (named 'labelX') against the first dimension of Y (named 'labelY') and write the result into Z
+  // X, Y, and Z must be on the same Executor (compile-time checked)
+  static void gemm(const Tensor& X, const Tensor& Y, Tensor& Z,
+                    const std::string& labelX, const std::string& labelY) {
+    // 1. Labels must exist
+    const size_t idxX = X.label_index(labelX);
+    const size_t idxY = Y.label_index(labelY);
+
+    // 2. Must be in gemm order
+    if (idxX != X.rank() - 1)
+      throw std::invalid_argument(
+          "Tensor::gemm: '" + labelX + "' must be the last dimension of X");
+    if (idxY != 0)
+      throw std::invalid_argument(
+          "Tensor::gemm: '" + labelY + "' must be the first dimension of Y");
+
+    // 3. Contracted dimension sizes must agree
+    const size_t K = X.dims_[idxX].dim;
+    if (Y.dims_[idxY].dim != K) {
+      std::ostringstream oss;
+      oss << "Tensor::gemm: contracted dimension size mismatch (" << labelX << "=" << K
+        << " vs " << labelY << "=" << Y.dims_[idxY].dim << ")";
+      throw std::invalid_argument(oss.str());
+    }
+
+    // 4. Output shape: X's dims minus labelX, Y's dims minus labelY.
+    // Collect product of X's surviving dims = M
+    // Collect product of Y's surviving dims = N
+    std::vector<TensorDim> result_dims;
+    result_dims.reserve(X.rank() - 1 + Y.rank() - 1);
+    size_t M = 1;
+    for (size_t i=0; i<X.rank()-1; ++i) {
+      result_dims.push_back(X.dims_[i]);
+      M *= X.dims_[i].dim;
+    }
+    size_t N = 1;
+    for (size_t i=1; i<Y.rank(); ++i) {
+      result_dims.push_back(Y.dims_[i]);
+      N *= Y.dims_[i].dim;
+    }
+    // Guard against X and Y shaing a surviving label
+    validate_unique_labels(result_dims);
+
+    // 4. Allocate or validate Z
+    // Throw if Z is already allocated and has unexpected dims
+    if (!Z.allocated()) {
+      Z.dims_ = std::move(result_dims);
+      Z.compute_strides();
+      Z.allocate();
+    } else {
+      if(Z.dims_.size() != result_dims.size()) 
+        throw std::invalid_argument("Tensor::gemm: output has wrong rank");
+      for (size_t i=0; i < result_dims.size(); ++i) {
+        if (Z.dims_[i] != result_dims[i])
+          throw std::invalid_argument("Tensor::gemm: output dim '" + 
+              Z.dims_[i].label + "' is incompatible with expected '" + 
+              result_dims[i].label + "'");
+      }
+    }
+
+    // Hand off to backend
+    Backend::gemm(*X.buffer_, M, K, *Y.buffer_, N, *Z.buffer_);
+  }
+  
+
 };
+
+
+
 
 }
