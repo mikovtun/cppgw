@@ -40,13 +40,24 @@ concept FunctionSpaceTag =
   std::same_as<F, RealFrequencySpace> ||
   std::same_as<F, RealTimeSpace>;
 
+template <class F>
+concept ImagFunctionSpaceTag = 
+  std::same_as<F, ImaginaryTimeSpace> ||
+  std::same_as<F, ImaginaryFrequencySpace>;
+
+template <class F>
+concept RealFunctionSpaceTag = 
+  std::same_as<F, RealTimeSpace> ||
+  std::same_as<F, RealFrequencySpace>;
+
 template <class T>
 concept HasFunctionSpace =
   requires {
     typename T::space;
   } && FunctionSpaceTag<typename T::space>;
 
-
+// These all satisfy the GridPoint concept, defined in grid.hpp
+// (except InverseTemperature)
 // Tau 
 struct ImaginaryTime {
   using space = ImaginaryTimeSpace;

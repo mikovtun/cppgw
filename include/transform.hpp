@@ -1,5 +1,8 @@
 #pragma once
-
+#include "types.hpp"
+#include "grid.hpp"
+#include "enums.hpp"
+#include "tensor.hpp"
 
 namespace cppgw {
 
@@ -9,6 +12,8 @@ namespace cppgw {
 // Flesh this out: I want to separate the BasisSet concept out from a particular axis, and
 // it should provide basis-set-specific helper functions. Transforms will use these helper functions.
 // Maybe impossible to separate from FunctionSpace?
+
+
 
 
 // A Representation is how temporal information about a function is stored
@@ -21,7 +26,60 @@ namespace cppgw {
 // * a Representation that they live in
 // One or more of the Tensor dims will belong to the Representation: these can be values
 // evaluated on a grid, or coefficients for a basis set expansion.
+template <class R, typename scalar_type, typename exec>
+concept TensorValuedRep = 
+  HasFunctionSpace<R> &&
+  requires(const R& x) {
+  { x.data } -> std::same_as<Tensor<scalar_type, exec>;
+};
+
+
+// A class of static functions that aid Chebyshev calculations
+class ChebyshevBasis {
+  // 1. Curtis-clenshaw recursion: basis function evaluation
+  // 2. Discrete cosine transform: values to coefficients
+  //
+};
+// It may be prudent to implement this as a concept ?
+
+
+
+// Specification for a basis expansion in Chebyshev polynomials
+// Chebyshev bases are good for finite domains: [0, β]
+template <ImaginaryFunctionSpace F, typename scalar_type, Executor exec>
+class ChebyshevRepresentation {
+  using space = F;
+  public:
+    size_t size = 5;   // Highest order of polynomials to expand in
+    Tensor<scalar_type, exec> data;
+    
+    // Constructor should take:
+    // 1. A span of TensorDims that specify the spatial components of the data
+    // 2. The order(size) of the expansion, which will be added as an additional dimension for to the tensor
+    
+};
+
 
 // A Transform is a class that mutates a TensorValuedRep from one Representation to another
+
+// A Fourier transform
+//template <class FT,
+//          TensorValuedRep<class Rfrom,  typename scalar_type, typename exec>,
+//          TensorValuedRep<class Rto,    typename scalar_type, typename exec>>
+//concept FourierTransform =
+//requires(Rfrom
+
+class ChebyshevFourierTransform {
+  // Inputs: A τ grid and a Matsubara iω_n grid. Templated over StatisticsTag.
+  // Stores: F_{mn}  <-- Transformation matrix for the mth Chebyshev polynomial
+  //                          from τ to Matsubara iω grid.
+  //         The inverse transform, which is obtained by evaluating the above at the 
+  //         Chebyshev nodes and using a discrete cosine transform
+  //
+  // Upon construction: Builds the F_{mn} matrix, which must be done in high precision
+  //                    according to the paper
+  // operator(TensorValuedRep<Time/Frequency FunctionSpace>): Applies the transform from time->frequency or frequency->time, dispatching according to the received FunctionSpace of the TVRep.
+};
+
 
 }
