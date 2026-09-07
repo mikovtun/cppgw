@@ -8,16 +8,15 @@
 #include "multiprecision.hpp"
 
 namespace cppgw {
-
-// Implements Chebyshev basis expansion using T as an internal type for fitting and evaluation
-// This class is purely numeric, and knows nothing of grids, FunctionSpaces, or anything like that
+// The numerical implementation of the Chebyshev basis:
+// Provides routines for evaluating and solving for chebyshev coefficients in arbitrary precision
 template <RealFloatingPoint T>
-class ChebyshevBasis {
+class ChebyshevBasisImpl {
 private:
   size_t order_;
 public:
-  ChebyshevBasis() = delete;
-  explicit ChebyshevBasis(size_t order) : order_(order) {};
+  ChebyshevBasisImpl() = delete;
+  explicit ChebyshevBasisImpl(size_t order) : order_(order) {};
   
   size_t order() const noexcept { return order_; }
   size_t size() const noexcept { return order_ + 1; }
@@ -80,5 +79,8 @@ public:
 
 
 };
+
+
+
 
 }
