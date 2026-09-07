@@ -116,10 +116,32 @@ private:
   Tensor<data_type, Executor::Host> data_;
 public:
   // Constructor: Take Tensor shape and add one dim for coefficients
-  
-  explicit ChebyshevExpansionTau(TensorShape spatial_tensor, size_t order) 
+  explicit ChebyshevExpansionTau(TensorShape spatial_tensor_shape, size_t order) 
     : impl_(order) {
+    // Throw if there are no dims in the spatial_tensor_shape: need at least a scalar
+    if (spatial_tensor_shape.size() == 0)
+      throw std::invalid_argument("ChebyshevExpansionTau: Need a tensor of nonzero rank");
+    size_t coeffsize = impl_.size();
+
+    // Add coefficient dimension as fastest
+    spatial_tensor_shape.insert_fast(TensorDim{"cheb_coeff", coeffsize});
+    data_ = Tensor<data_type, Executor::Host>(spatial_tensor_shape);
   }
+
+  // Constructor: Take Tensor and add one dim for coefficients
+  explicit ChebyshevExpansionTau(Tensor<data_type, Executor::Host>& spatial_tensor, size_t order) 
+    : impl_(order) {
+    // Throw if there are no dims in the spatial_tensor_shape: need at least a scalar
+    if (spatial_tensor.rank() == 0)
+      throw std::invalid_argument("ChebyshevExpansionTau: Need a tensor of nonzero rank");
+    size_t coeffsize = impl_.size();
+
+    // Add coefficient dimension as fastest
+    data_ = std::move(spatial_tensor);
+    data_.add_dim({"cheb_coeff", coeffsize}, /* slow */ false, /* copy */ true);
+  }
+
+  Tensor<data_type, Executor::Host>& data() { return data_; }
 
 };
 

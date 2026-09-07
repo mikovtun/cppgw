@@ -22,11 +22,23 @@ concept TensorShapeLike =
   std::ranges::range<T> &&
   std::same_as<std::ranges::range_value_t<T>, TensorDim>;
 
+// TODO: make this satisfy the above!
 struct TensorShape {
   std::vector<TensorDim> dims;
   template<TensorShapeLike R>
     explicit TensorShape(R&& d) : dims(std::ranges::begin(d), std::ranges::end(d)) {}
   TensorShape(std::initializer_list<TensorDim> d) : dims(d) {}
+
+  void insert_fast(const TensorDim d) {
+    dims.insert(dims.begin(), d);
+  }
+  void insert_slow(const TensorDim d) {
+    dims.push_back(d);
+  }
+  size_t size() const { return dims.size(); }
+
+  auto begin() { return dims.begin(); }
+  auto end() { return dims.end(); }
 };
 
 

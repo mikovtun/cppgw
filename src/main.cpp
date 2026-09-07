@@ -36,9 +36,17 @@ int main(int argc, char** argv) {
                                         "y", "x");
   matrix3.print();
 
+  // Test chebyshev machinery
   ChebyshevBasisImpl<numerics::float50> CB(5);
   std::vector<float> coeffs {0.0, 1.0, 5.0, 0.0, 0.0};
   std::cout << CB.evaluate(coeffs, 0.5) << std::endl;
+
+  TensorShape shape1{{"u", 2}, {"v", 2}};
+  ChebyshevExpansionTau<float> CET(shape1, 8);
+  std::cout << "ChebExpTau data: " << CET.data() << std::endl;
+  ChebyshevExpansionTau<double> CET2(matrix3, 8);
+  std::cout << "ChebExpTau matrix1: " << CET2.data() << std::endl;
+  
 
 
   return 0;
