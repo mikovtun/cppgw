@@ -9,7 +9,8 @@
 
 #include "common.hpp"
 #include "grid.hpp"
-#include "tensor.hpp"
+#include "../grid/matsubara.hpp"
+#include "../tensor.hpp"
 #include "multiprecision.hpp"
 
 namespace cppgw {
@@ -107,9 +108,19 @@ public:
 };
 
 
+// Expansion types: (such as ChebyshevExpansion)
+// 1. Do not own a grid, they own an expansion
+// 2. Accept tensors with a "grid point" dimension in a function called fit()?
+//    * Each temporal data space (FunctionSpace, Grid/basis) pair needs a standardized tensor dimension, so that these functions always know what they are. A special string, or maybe an enum?
+// 3. 
+
+
 // The τ-space Chebyshev tensor expansion
 template <FloatingPoint data_type, RealFloatingPoint cheb_impl_type = double>
 class ChebyshevExpansionTau {
+public:
+  using DimLabel = ChebyshevExpansionDimLabel<ImaginaryTimeSpace>;
+  inline static constexpr DimLabel dim_label{};
   using space = ImaginaryTimeSpace;
 private:
   ChebyshevBasisImpl<cheb_impl_type> impl_;
@@ -124,7 +135,7 @@ public:
     size_t coeffsize = impl_.size();
 
     // Add coefficient dimension as fastest
-    spatial_tensor_shape.insert_fast(TensorDim{"cheb_coeff", coeffsize});
+    spatial_tensor_shape.insert_fast(TensorDim{dim_label, coeffsize});
     data_ = Tensor<data_type, Executor::Host>(spatial_tensor_shape);
   }
 
@@ -134,6 +145,49 @@ public:
     // Throw if there are no dims in the spatial_tensor_shape: need at least a scalar
     if (spatial_tensor.rank() == 0)
       throw std::invalid_argument("ChebyshevExpansionTau: Need a tensor of nonzero rank");
+    size_t coeffsize = impl_.size();
+
+    // Add coefficient dimension as fastest
+    data_ = std::move(spatial_tensor);
+    data_.add_dim({dim_label, coeffsize}, /* slow */ false, /* copy */ true);
+  }
+
+  Tensor<data_type, Executor::Host>& data() { return data_; }
+
+};
+
+
+
+// The Matsubara-space Chebyshev tensor expansion
+template <StatisticsTag S, FloatingPoint data_type, RealFloatingPoint cheb_impl_type = double>
+class ChebyshevExpansionMatsubara {
+public:
+  using DimLabel = ChebyshevExpansionDimLabel<ImaginaryFrequencySpace>;
+  inline static constexpr DimLabel dim_label{};
+  using space = ImaginaryFrequencySpace;
+private:
+  ChebyshevBasisImpl<cheb_impl_type> impl_;
+  Tensor<data_type, Executor::Host> data_;
+public:
+  // Constructor: Take Tensor shape and add one dim for coefficients
+  explicit ChebyshevExpansionMatsubara(TensorShape spatial_tensor_shape, size_t order) 
+    : impl_(order) {
+    // Throw if there are no dims in the spatial_tensor_shape: need at least a scalar
+    if (spatial_tensor_shape.size() == 0)
+      throw std::invalid_argument("ChebyshevExpansionMatsubara: Need a tensor of nonzero rank");
+    size_t coeffsize = impl_.size();
+
+    // Add coefficient dimension as fastest
+    spatial_tensor_shape.insert_fast(TensorDim{"cheb_coeff", coeffsize});
+    data_ = Tensor<data_type, Executor::Host>(spatial_tensor_shape);
+  }
+
+  // Constructor: Take Tensor and add one dim for coefficients
+  explicit ChebyshevExpansionMatsubara(Tensor<data_type, Executor::Host>& spatial_tensor, size_t order) 
+    : impl_(order) {
+    // Throw if there are no dims in the spatial_tensor_shape: need at least a scalar
+    if (spatial_tensor.rank() == 0)
+      throw std::invalid_argument("ChebyshevExpansionMatsubara: Need a tensor of nonzero rank");
     size_t coeffsize = impl_.size();
 
     // Add coefficient dimension as fastest

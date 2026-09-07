@@ -55,7 +55,7 @@ private:
 
   std::optional<size_t> find_label_index(const std::string& label) const {
     for(size_t i=0; i<dims_.size(); ++i)
-      if(dims_[i].label == label)
+      if(label_equals(dims_[i].label, label))
         return i;
     return std::nullopt;
   }
@@ -63,8 +63,9 @@ private:
   static void validate_unique_labels(const std::span<TensorDim>& dims) {
     std::unordered_set<std::string> seen;
     for (const auto& d : dims) {
-      if (!seen.insert(d.label).second)
-        throw std::invalid_argument("Tensor: duplicate dimension label '" + d.label + "'");
+      const std::string key = label_to_string(d.label);
+      if (!seen.insert(key).second)
+        throw std::invalid_argument("Tensor: duplicate dimension label '" + key + "'");
     }
   }
 
@@ -156,7 +157,7 @@ public:
       if (i > 0)
         os << ", ";
 
-      os << dims_[i].label << "=" << dims_[i].dim;
+      os << label_to_string(dims_[i].label) << "=" << dims_[i].dim;
     }
 
     os << ")\n";
@@ -194,9 +195,10 @@ public:
   void add_dim(const TensorDim& newdim, bool slow = true, bool fill = false) {
     if (newdim.dim == 0)
       throw std::invalid_argument("Tensor::add_dim: dimension size must be > 0");
-    if (has_label(newdim.label))
+    if (std::holds_alternative<std::string>(newdim.label) &&
+        has_label(label_to_string(newdim.label)))
       throw std::invalid_argument("Tensor::add_dim: duplicate dimension label '"
-          + newdim.label + "'");
+          + label_to_string(newdim.label) + "'");
 
     if (slow)
       dims_.push_back(newdim);
@@ -270,9 +272,9 @@ public:
         throw std::invalid_argument("Tensor::gemm: output has wrong rank");
       for (size_t i=0; i < result_dims.size(); ++i) {
         if (Z.dims_[i] != result_dims[i])
-          throw std::invalid_argument("Tensor::gemm: output dim '" + 
-              Z.dims_[i].label + "' is incompatible with expected '" + 
-              result_dims[i].label + "'");
+          throw std::invalid_argument("Tensor::gemm: output dim '"
+              + label_to_string(Z.dims_[i].label) + "' is incompatible with expected '"
+              + label_to_string(result_dims[i].label) + "'");
       }
     }
 

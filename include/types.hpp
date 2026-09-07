@@ -63,6 +63,7 @@ struct ImaginaryTime {
   using space = ImaginaryTimeSpace;
   double value {};
   constexpr explicit ImaginaryTime(double x) : value(x) {}
+  constexpr ImaginaryTime() noexcept = default;
   constexpr bool operator==(const ImaginaryTime& o) const noexcept { return value == o.value; }
 };
 
