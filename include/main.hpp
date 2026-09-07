@@ -1,6 +1,6 @@
 #pragma once
 #include "types.hpp"
-#include "enums.hpp"
+#include "common.hpp"
 #include "multiprecision.hpp"
 #include "grid.hpp"
 #include "representation.hpp"

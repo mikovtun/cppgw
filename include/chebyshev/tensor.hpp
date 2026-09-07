@@ -11,7 +11,7 @@ namespace cppgw {
 
   // Specification for a basis expansion in Chebyshev polynomials
   // Chebyshev bases are good for finite domains: [0, β]
-  template <ImaginaryFunctionSpace F, typename scalar_type, Executor exec>
+  template <ImagFunctionSpaceTag F, typename scalar_type, typename exec>
     class ChebyshevRepresentation {
       using space = F;
       public:

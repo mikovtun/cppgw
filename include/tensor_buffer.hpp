@@ -1,12 +1,12 @@
 #pragma once
-#include "enums.hpp"
+#include "common.hpp"
 #include <vector>
 #include <memory>
 
 namespace cppgw {
 
 // TensorBuffer<T, E> is the storage primitive: it owns 'count' elements of type T living on Executor E.
-// It intentionally exposes a minimal interface (data(), size()).
+// Pointer management, lifetime, and resizes are handled by this class
 // All math lives in LinAlgBackend, not here
 
 // Forward declare generic

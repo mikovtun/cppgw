@@ -1,5 +1,5 @@
 #pragma once
-#include "enums.hpp"
+#include "common.hpp"
 #include "tensor_buffer.hpp"
 #include <vector>
 #include <complex>

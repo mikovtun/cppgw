@@ -1,7 +1,7 @@
 #pragma once
 #include "types.hpp"
 #include "grid.hpp"
-#include "enums.hpp"
+#include "common.hpp"
 #include "tensor.hpp"
 
 namespace cppgw {

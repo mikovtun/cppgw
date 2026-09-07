@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
                                         "y", "x");
   matrix3.print();
 
-  ChebyshevBasis<double> CB(5);
+  ChebyshevBasisImpl<numerics::float50> CB(5);
   std::vector<float> coeffs {0.0, 1.0, 5.0, 0.0, 0.0};
   std::cout << CB.evaluate(coeffs, 0.5) << std::endl;
 

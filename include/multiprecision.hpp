@@ -1,7 +1,7 @@
 #pragma once
 
 #include <concepts>
-#include "boost/multiprecision/cpp_dec_float.hpp"
+#include "boost/multiprecision/cpp_bin_float.hpp"
 #include "boost/multiprecision/number.hpp"
 
 namespace cppgw {
@@ -10,22 +10,22 @@ namespace cppgw {
     template <typename T>
     T pi() { return T("3.14159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651e+00"); }
 
+    // --- Convenient types ---
+    using float50 = boost::multiprecision::cpp_bin_float_50;
+
     // --- Concept definitions ---
 
     template <typename T>
     concept NativeRealFloatingPoint = std::floating_point<T>;
     
+    // A boost::multiprecision::number<...> type whose backend is classified
+    // as a real (non-complex) floating point.
+    // number_category<T>::value is an enum of number_category_type (number_kind_*).
     template <typename T>
-    concept BoostRealFloatingPoint = requires {
-      typename T::backend_type;
-    } && std::is_floating_point_v<typename boost::multiprecision::number_category<T>::type>
-      && std::derived_from<
-        T,
-        boost::multiprecision::number<
-          typename T::backend_type,
-        T::thread_safe ? boost::multiprecision::et_on : boost::multiprecision::et_off?
-          >
-          >;
+    concept BoostRealFloatingPoint =
+      requires { typename T::backend_type; } &&      // must be a boost multiprecision type
+      boost::multiprecision::number_category<T>::value ==
+        boost::multiprecision::number_kind_floating_point;
 
       template <typename T>
         concept RealFloatingPoint = NativeRealFloatingPoint<T> || BoostRealFloatingPoint<T>;
@@ -37,25 +37,18 @@ namespace cppgw {
         } && NativeRealFloatingPoint<typename T::value_type>
       && std::same_as<T, std::complex<typename T::value_type>>;
 
-      // Boost cpp_complex<Precision> or multiprecision complex types
+      // Boost complex multiprecision type
       template <typename T>
-        concept BoostComplexFloatingPoint = requires {
-          typename T::backend_type;
-        } && std::derived_from<
-      T, 
-        boost::multiprecision::number<
-          typename T::backend_type, 
-        T::thread_safe ? boost::multiprecision::et_on : boost::multiprecision::et_off
-          >
-          >
-          // Boost classifies complex numbers under complex_number_type
-          && std::is_same_v<
-          typename boost::multiprecision::number_category<T>::type, 
-        boost::multiprecision::complex_number_type
-          >;
+        concept BoostComplexFloatingPoint =
+          requires { typename T::backend_type; } &&
+          boost::multiprecision::number_category<T>::value ==
+            boost::multiprecision::number_kind_complex;
 
       template <typename T>
-        concept AnyComplexFloatingPoint = NativeComplexFloatingPoint<T> || BoostComplexFloatingPoint<T>;
+        concept ComplexFloatingPoint = NativeComplexFloatingPoint<T> || BoostComplexFloatingPoint<T>;
+
+      template <typename T>
+        concept FloatingPoint = RealFloatingPoint<T> || ComplexFloatingPoint<T>;
 
     // --- Tests ---
     static_assert( NativeRealFloatingPoint<float>);
@@ -65,7 +58,13 @@ namespace cppgw {
 
     static_assert(!BoostRealFloatingPoint<float>);
     static_assert(!BoostRealFloatingPoint<double>);
-    static_assert( BoostRealFloatingPoint<cpp_bin_float_50>);
+    static_assert( BoostRealFloatingPoint<float50>);
+
+    static_assert( RealFloatingPoint<double>);
+    static_assert( RealFloatingPoint<float50>);
+    static_assert( NativeComplexFloatingPoint<std::complex<double>>);
+    static_assert(!NativeComplexFloatingPoint<double>);
+    static_assert( ComplexFloatingPoint<std::complex<double>>);
 
     // TODO: flesh out tests
   }

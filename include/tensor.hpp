@@ -1,5 +1,5 @@
 #pragma once
-#include "enums.hpp"
+#include "common.hpp"
 #include "tensor_buffer.hpp"
 #include "linalgbackend.hpp"
 #include <vector>
@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <unordered_set>
+#include <ranges>
 #include <iostream>
 #include <typeinfo>
 
@@ -36,6 +37,20 @@ struct TensorDim {
   }
 };
 
+// A range of TensorDims makes a TensorShape
+// * Instantiable from any container (or span) of TensorDims
+template <typename T>
+concept TensorShapeLike = 
+  std::ranges::range<T> &&
+  std::same_as<std::ranges::range_value_t<T>, TensorDim>;
+
+struct TensorShape {
+  std::vector<TensorDim> dims;
+  template<TensorShapeLike R>
+    explicit TensorShape(R&& d) : dims(std::ranges::begin(d), std::ranges::end(d)) {}
+  TensorShape(std::initializer_list<TensorDim> d) : dims(d) {}
+};
+
 
 
 
@@ -45,7 +60,7 @@ class Tensor {
   using Backend = LinAlgBackend<scalar_type, exec>;
 private:
   // Layout information
-  std::vector<TensorDim>  dims_;
+  std::vector<TensorDim>  dims_;      // Order: fastest to slowest
   std::vector<size_t>     strides_;
   size_t                  total_elements_ = 0;
   // Storage
@@ -117,6 +132,9 @@ public:
     : dims_(std::begin(inputDims), std::end(inputDims)) { compute_strides(); allocate(); }
   // Accept brace-enclosed initializer lists too
   Tensor(std::initializer_list<TensorDim> inputDims) : dims_(inputDims) { compute_strides(); }
+
+  // Copies should be disabled? Shallow by default? Provide deepcopy function?
+  // Moves should be allowed
 
   // ----- Layout -----
   size_t total_elements() const { return total_elements_; }
@@ -190,6 +208,23 @@ public:
   friend std::ostream& operator<<(std::ostream& os, const Tensor& tensor) {
     tensor.print(os);
     return os;
+  }
+
+  // ----- Modifiers -----
+  // * Adds a new dimension to the dim list
+  // * Copies existing data onto the new axis
+  void add_dim(const TensorDim& newdim, bool slow = true) {
+    // default to adding a slow dim
+    auto olddims = dims_;
+    if(slow)
+      dims_.push_back(newdim);
+    else 
+      dims_.insert(newdim);
+    compute_strides();
+    if(allocated()) {
+      buffer_->resize(total_elements());
+      // TODO: Call backend to perform copy here!
+    }
   }
 
   // ----- Operations -----

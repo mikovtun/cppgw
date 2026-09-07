@@ -1,40 +1,61 @@
 #pragma once
 #include <numbers>
+#include <vector>
+#include <span>
+#include <concepts>
+#include <iterator>
+#include <cmath>
+#include <type_traits>
 
+#include "common.hpp"
 #include "grid.hpp"
-#include "enums.hpp"
 #include "tensor.hpp"
-
 #include "multiprecision.hpp"
 
 namespace cppgw {
+// Make the numeric concepts visible in the cppgw namespace
+using numerics::RealFloatingPoint;
+using numerics::FloatingPoint;
+
+
+// C is a range whose element is a real floating-point type
+// (native std::floating_point or a boost multiprecision real).
+template <class C>
+concept RealFloatRange = RealFloatingPoint<Elem<C>>;
+
 // The numerical implementation of the Chebyshev basis:
-// Provides routines for evaluating and solving for chebyshev coefficients in arbitrary precision
+// Provides routines for evaluating Chebyshev polynomials and for
+// solving for chebyshev coefficients in arbitrary precision.
+//
+// API contract:
+//   * inputs  -> any contiguous range of real floats (std::vector, std::span, ...)
+//   * returns -> scalar T, or std::vector<T>
 template <RealFloatingPoint T>
 class ChebyshevBasisImpl {
 private:
   size_t order_;
 public:
   ChebyshevBasisImpl() = delete;
-  explicit ChebyshevBasisImpl(size_t order) : order_(order) {};
-  
+  explicit ChebyshevBasisImpl(size_t order) : order_(order) {}
+
   size_t order() const noexcept { return order_; }
   size_t size() const noexcept { return order_ + 1; }
-  
+
   // Chebyshev nodes:
   // x_j = cos(pi*j/N), j = 0,...,N
   std::vector<T> nodes() const {
     std::vector<T> x(size());
-    const T p = p<T>();
-
-    if (order_ == 0)
-      return std::vector({T(1)});
-    else
-      for(size_t j=0; j<size(); ++j)
-        x[j] = cos(p * static_cast<T>(j) / static_cast<T>(order_));
+    if (order_ == 0) {
+      x[0] = T(1);
+      return x;
+    }
+    for(size_t j=0; j<size(); ++j) {
+      const double arg = std::numbers::pi * static_cast<double>(j) / static_cast<double>(order_);
+      x[j] = T(std::cos(arg));
+    }
     return x;
   }
-  
+
   // Evaluate the Chebyshev polynomial T_n(x) using three-term recurrence
   static T polynomial(size_t n, T x) {
     if (n==0)
@@ -45,42 +66,61 @@ public:
     T prev1 = x;
     T tcurr {};
     for (size_t k=2; k<=n; ++k) {
-      tCurr = T(2) * x * tPrev1 - tPrev2;
-      tPrev2 = tPrev1;
-      tPrev1 = tCurr;
+      tcurr = T(2) * x * prev1 - prev2;
+      prev2 = prev1;
+      prev1 = tcurr;
     }
-    return tPrev1;
+    return prev1;
   }
-  
-  // Evaluate a coefficient vector at a sample point
-  template <RealFloatingPoint U>
-  T evaluate(std::span<const U> coeffs, U x) const {
-    const size_t n = order_;
+
+  // Evaluate a coefficient vector at a single sample point x (Clenshaw's
+  // recurrence). coeffs[k] is the coefficient of T_k; the degree evaluated is
+  // min(order_, coeffs.size()-1), so a short coefficient vector is safely
+  // clamped instead of reading out of bounds.
+  template <class Coeffs, class U>
+  requires RealFloatRange<Coeffs> && RealFloatingPoint<U>
+  T evaluate(const Coeffs& coeffs, U x) const {
+    const size_t total = static_cast<size_t>(coeffs.size());
+    if (total < 2) return T(0);
+    const size_t n = (order_ < total - 1) ? order_ : (total - 1);  // top degree used
     T bK1{0};   // b_{k+1}
     T bK2{0};   // b_{k+2}
     for(size_t i=0; i<n; ++i) {
-      const size_t k = n - i;
+      const size_t k = n - i;          // k runs n, n-1, ..., 1
       const T bK = T(coeffs[k]) + T(2) * T(x) * bK1 - bK2;
       bK2 = bK1;
       bK1 = bK;
     }
-    return coefficients[0] + x * bK1 - bK2;
+    return T(coeffs[0]) + T(x) * bK1 - bK2;
   }
 
-  // Evaluate a coefficient vector at many sample points
-  template <RealFloatingPoint U>
-  std::vector<T> evaluate(std::span<const U> coeffs, std::span<const U> x) const {
+  // Evaluate a coefficient vector at many sample points x.
+  template <class Coeffs, class Xs>
+  requires RealFloatRange<Coeffs> && RealFloatRange<Xs>
+  std::vector<T> evaluate(const Coeffs& coeffs, const Xs& x) const {
     std::vector<T> out(x.size());
     for(size_t i=0; i<x.size(); ++i)
-      out[i] = evaluate<U>(coeffs, x[i]);
+      out[i] = evaluate(coeffs, x[i]);
     return out;
   }
-
-
 
 };
 
 
+// The τ-space Chebyshev tensor expansion
+template <FloatingPoint data_type, RealFloatingPoint cheb_impl_type = double>
+class ChebyshevExpansionTau {
+  using space = ImaginaryTimeSpace;
+private:
+  ChebyshevBasisImpl<cheb_impl_type> impl_;
+  Tensor<data_type, Executor::Host> data_;
+public:
+  // Constructor: Take Tensor shape and add one dim for coefficients
+  
+  explicit ChebyshevExpansionTau(TensorShape spatial_tensor, size_t order) 
+    : impl_(order) {
+  }
 
+};
 
 }

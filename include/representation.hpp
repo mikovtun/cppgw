@@ -1,7 +1,7 @@
 #pragma once
 #include "types.hpp"
 #include "grid.hpp"
-#include "enums.hpp"
+#include "common.hpp"
 #include "tensor.hpp"
 
 namespace cppgw {
@@ -15,10 +15,8 @@ template <class R, typename scalar_type, typename exec>
 concept TensorValuedRep = 
   HasFunctionSpace<R> &&
   requires(const R& x) {
-  { x.data } -> std::same_as<Tensor<scalar_type, exec>;
-};
-
-
+    requires std::same_as<std::remove_cvref_t<decltype(x.data)>, Tensor<scalar_type, exec>>;
+  };
 
 
 
