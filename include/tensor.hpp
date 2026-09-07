@@ -107,7 +107,7 @@ public:
   explicit Tensor(R&& inputDims) 
     : dims_(std::begin(inputDims), std::end(inputDims)) { compute_strides(); allocate(); }
   // Accept brace-enclosed initializer lists too
-  Tensor(std::initializer_list<TensorDim> inputDims) : dims_(inputDims) { compute_strides(); }
+  Tensor(std::initializer_list<TensorDim> inputDims) : dims_(inputDims) { compute_strides(); allocate(); }
 
   // Copies should be disabled? Shallow by default? Provide deepcopy function?
   // Moves should be allowed
@@ -188,18 +188,29 @@ public:
 
   // ----- Modifiers -----
   // * Adds a new dimension to the dim list
-  // * Copies existing data onto the new axis
-  void add_dim(const TensorDim& newdim, bool slow = true) {
-    // default to adding a slow dim
-    auto olddims = dims_;
-    if(slow)
+  // * If slow = true, the new dim is the slowest
+  // * If fill = true, copies existing data onto every slice of the new axis (broadcast)
+  //   otherwise the data lives only in slice k = 0 and the rest of the buffer is zero
+  void add_dim(const TensorDim& newdim, bool slow = true, bool fill = false) {
+    if (newdim.dim == 0)
+      throw std::invalid_argument("Tensor::add_dim: dimension size must be > 0");
+    if (has_label(newdim.label))
+      throw std::invalid_argument("Tensor::add_dim: duplicate dimension label '"
+          + newdim.label + "'");
+
+    if (slow)
       dims_.push_back(newdim);
-    else 
-      dims_.insert(newdim);
+    else
+      dims_.insert(dims_.begin(), newdim);   // fastest axis = front of dims_
+
     compute_strides();
-    if(allocated()) {
-      buffer_->resize(total_elements());
-      // TODO: Call backend to perform copy here!
+
+    if (buffer_) {
+      // Existing data: grow + broadcast in a single allocation
+      buffer_->resize_new_dim(newdim.dim, slow, fill);
+    } else if (total_elements_ > 0) {
+      // No prior data (e.g. rank-0 tensor): fresh zero storage
+      allocate();
     }
   }
 

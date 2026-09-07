@@ -1,6 +1,7 @@
 #pragma once
 #include "common.hpp"
 #include "tensor_buffer.hpp"
+#include "tensor_shape.hpp"
 #include <vector>
 #include <complex>
 
@@ -18,6 +19,7 @@ template <typename T>
 class LinAlgBackend<T, Executor::Host>  {
   using E = Executor::Host;
   public:
+
   static void gemm(const TensorBuffer<T, E>& A, size_t M, size_t K,
       const TensorBuffer<T, E>& B, size_t N,
       TensorBuffer<T, E>& C) {
