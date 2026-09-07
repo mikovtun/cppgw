@@ -14,7 +14,15 @@ namespace cppgw {
 // Maybe impossible to separate from FunctionSpace?
 
 
-
+// BasisSet classes should specify a basis set expansion without owning the coefficient data
+// Requires:
+// A grid->coefficients function that fits or solves for expansion coefficients
+// A coefficients->grid function that evaluates a set of coefficients on a grid
+// Questions to be answered:
+// Should these functions act on a Tensor?
+// Should these functions work on both tau and imaginary time?
+//template <class B>
+//concept Basis
 
 // A Representation is how temporal information about a function is stored
 // The tuple (FunctionSpace, BasisSet) specifies the Representation. 
@@ -34,13 +42,6 @@ concept TensorValuedRep =
 };
 
 
-// A class of static functions that aid Chebyshev calculations
-class ChebyshevBasis {
-  // 1. Curtis-clenshaw recursion: basis function evaluation
-  // 2. Discrete cosine transform: values to coefficients
-  //
-};
-// It may be prudent to implement this as a concept ?
 
 
 

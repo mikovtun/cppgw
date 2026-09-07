@@ -9,6 +9,7 @@ include(FetchContent)
 
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
+find_package(Boost REQUIRED)
 
 FetchContent_Declare(
   HighFive
@@ -30,4 +31,5 @@ target_link_libraries(cppgw
 )
 target_include_directories(cppgw PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${Boost_INCLUDE_DIRS}
 )
