@@ -109,10 +109,19 @@ public:
 
 
 // Expansion types: (such as ChebyshevExpansion)
-// 1. Do not own a grid, they own an expansion
-// 2. Accept tensors with a "grid point" dimension in a function called fit()?
-//    * Each temporal data space (FunctionSpace, Grid/basis) pair needs a standardized tensor dimension, so that these functions always know what they are. A special string, or maybe an enum?
-// 3. 
+// 1. Own a coefficient expansion on a FunctionSpace
+// Transformation classes handle transforming between ChebyshevExpansionTau and ChebyshevExpansionMatsubara via Fourier transform
+// 2. Have a function to produce/update coefficients from Grid data on that function space
+// 3. Have a function to produce/update Grid data from coefficients
+//      * The above are Transformations, and Transformations should be data-owning classes
+//
+// Constructors: I want to be able to build these from...
+// 1. a properly formatted tensor (i.e. with special tensor indices)
+// 2. a spatial tensor shape: append special tensor index and allocate
+// 3. a spatial tensor: append special tensor index and optionally copy
+//
+// Extras:
+// It would be convenient to have an operator(i) that accesses the spatial tensor at the special index i
 
 
 // The τ-space Chebyshev tensor expansion
@@ -126,6 +135,8 @@ private:
   ChebyshevBasisImpl<cheb_impl_type> impl_;
   Tensor<data_type, Executor::Host> data_;
 public:
+  // Delete default constructor
+  ChebyshevExpansionTau() = delete;
   // Constructor: Take Tensor shape and add one dim for coefficients
   explicit ChebyshevExpansionTau(TensorShape spatial_tensor_shape, size_t order) 
     : impl_(order) {
@@ -153,7 +164,6 @@ public:
   }
 
   Tensor<data_type, Executor::Host>& data() { return data_; }
-
 };
 
 

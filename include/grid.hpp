@@ -23,6 +23,7 @@ template <typename G>
 concept Grid = 
   requires(const G& g) {
     g.points();
+    g.dim_label;
   };
 
 // Quadratures have points and weights
@@ -32,5 +33,12 @@ concept Quadrature =
   requires(const G& g) {
     g.weights();
   };
+
+
+template <typename G>
+concept ImaginaryTimeGrid = 
+  Grid<G> &&
+  std::same_as<typename G::point_type, ImaginaryTime>;
+
 
 }

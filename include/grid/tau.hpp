@@ -1,6 +1,7 @@
 #pragma once
 #include "grid.hpp"
 #include "types.hpp"
+#include "tensor.hpp"
 
 #include <cmath>
 #include <limits>
@@ -23,8 +24,7 @@ namespace cppgw {
 // ---------------------------------------------------------------------------
 // UniformImaginaryTimeGrid
 //   n equally spaced half-centered points  τ_i = (i + 1/2)·β/n  ∈ (0, β)
-//   Trapezoidal weights  w_i = β/n  (exact for constants, ideal for
-//   (anti)periodic Matsubara series)
+//   Trapezoidal weights  w_i = β/n
 // ---------------------------------------------------------------------------
 class UniformImaginaryTimeGrid {
 public:
@@ -33,7 +33,7 @@ public:
   using DimLabel = GridDimLabel<space>;
   inline static constexpr DimLabel dim_label{};
 private:
-  std::vector<point_type>  grid_;
+  std::vector<point_type>  points_;
   std::vector<double>         weights_;
   InverseTemperature          beta_;
 public:
@@ -41,24 +41,24 @@ public:
     if (n == 0)
       throw std::invalid_argument("UniformImaginaryTimeGrid: need at least 1 grid point");
     const double h = b.value / static_cast<double>(n);
-    grid_.resize(n);
+    points_.resize(n);
     weights_.assign(n, h);
     for (size_t i = 0; i < n; ++i)
-      grid_[i] = point_type((static_cast<double>(i) + 0.5) * h);
+      points_[i] = point_type((static_cast<double>(i) + 0.5) * h);
   }
   UniformImaginaryTimeGrid() = delete;
 
-  size_t size() const { return grid_.size(); }
+  size_t size() const { return points_.size(); }
   InverseTemperature beta() const { return beta_; }
 
   // Indexed access to a grid point
   point_type operator()(size_t i) const {
-    if (i >= grid_.size())
+    if (i >= points_.size())
       throw std::out_of_range("UniformImaginaryTimeGrid: index out of range");
-    return grid_[i];
+    return points_[i];
   }
 
-  const std::vector<point_type>& points()  const { return grid_; }
+  const std::vector<point_type>& points()  const { return points_; }
   const std::vector<double>&        weights() const { return weights_; }
 };
 
@@ -75,7 +75,7 @@ public:
   using DimLabel = GridDimLabel<space>;
   inline static constexpr DimLabel dim_label{};
 private:
-  std::vector<point_type>  grid_;
+  std::vector<point_type>  points_;
   std::vector<double>         weights_;
   InverseTemperature          beta_;
 
@@ -114,25 +114,25 @@ public:
       throw std::invalid_argument("GaussLegendreImaginaryTimeGrid: need at least 1 grid point");
     std::vector<double> x, w;
     legendre(n, x, w);
-    grid_.resize(n);
+    points_.resize(n);
     weights_.resize(n);
     for (size_t i = 0; i < n; ++i) {
-      grid_[i]    = point_type(b.value * 0.5 * (1.0 + x[i]));
+      points_[i]    = point_type(b.value * 0.5 * (1.0 + x[i]));
       weights_[i] = b.value * 0.5 * w[i];
     }
   }
   GaussLegendreImaginaryTimeGrid() = delete;
 
-  size_t size() const { return grid_.size(); }
+  size_t size() const { return points_.size(); }
   InverseTemperature beta() const { return beta_; }
 
   point_type operator()(size_t i) const {
-    if (i >= grid_.size())
+    if (i >= points_.size())
       throw std::out_of_range("GaussLegendreImaginaryTimeGrid: index out of range");
-    return grid_[i];
+    return points_[i];
   }
 
-  const std::vector<point_type>& points()  const { return grid_; }
+  const std::vector<point_type>& points()  const { return points_; }
   const std::vector<double>&        weights() const { return weights_; }
 };
 
@@ -151,33 +151,33 @@ public:
   using DimLabel = GridDimLabel<space>;
   inline static constexpr DimLabel dim_label{};
 private:
-  std::vector<point_type> grid_;
+  std::vector<point_type> points_;
   InverseTemperature         beta_;
   size_t                     order_;
 public:
   // order = highest Chebyshev polynomial order (N); yields N + 1 nodes
   ChebyshevNodeImaginaryTimeGrid(InverseTemperature b, size_t order): beta_(b), order_(order) {
     const size_t N = order_;
-    grid_.resize(N + 1);
+    points_.resize(N + 1);
     for (size_t j = 0; j <= N; ++j) {
       const double x = (N == 0) ? 1.0
           : std::cos(std::numbers::pi * static_cast<double>(j) / static_cast<double>(N));
-      grid_[j] = point_type(b.value * 0.5 * (1.0 + x));
+      points_[j] = point_type(b.value * 0.5 * (1.0 + x));
     }
   }
   ChebyshevNodeImaginaryTimeGrid() = delete;
 
-  size_t size() const { return grid_.size(); }
+  size_t size() const { return points_.size(); }
   size_t order() const { return order_; }
   InverseTemperature beta() const { return beta_; }
 
   point_type operator()(size_t i) const {
-    if (i >= grid_.size())
+    if (i >= points_.size())
       throw std::out_of_range("ChebyshevNodeImaginaryTimeGrid: index out of range");
-    return grid_[i];
+    return points_[i];
   }
 
-  const std::vector<point_type>& points() const { return grid_; }
+  const std::vector<point_type>& points() const { return points_; }
 };
 
 // ---------------------------------------------------------------------------
@@ -189,5 +189,30 @@ static_assert( HasFunctionSpace<ChebyshevNodeImaginaryTimeGrid>);
 static_assert( Quadrature<UniformImaginaryTimeGrid>);
 static_assert( Quadrature<GaussLegendreImaginaryTimeGrid>);
 static_assert( Grid<ChebyshevNodeImaginaryTimeGrid>);
+
+static_assert( ImaginaryTimeGrid<UniformImaginaryTimeGrid>);
+static_assert( ImaginaryTimeGrid<ChebyshevNodeImaginaryTimeGrid>);
+static_assert( ImaginaryTimeGrid<GaussLegendreImaginaryTimeGrid>);
+
+
+
+// ---------------------------------------------------------------------------
+// Tensor Valued Grids (data owning)
+// ---------------------------------------------------------------------------
+template <FloatingPoint data_type, ImaginaryTimeGrid G>
+class GridExpansionTau {
+public:
+  using space = ImaginaryTimeSpace;
+private:
+  Tensor<data_type, Executor::Host> data_;
+  G grid_;
+public:
+  GridExpansionTau() = delete;
+  // Constructor: Build from pre-existing tensor with G::dim_label dimension and corresponding Grid
+  explicit GridExpansionTau(Tensor<data_type, Executor::Host> d_in, G g_in) : grid_(g_in) {
+    // Make sure the dim_label is correct
+    //d_in.
+  }
+};
 
 }

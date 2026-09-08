@@ -53,19 +53,19 @@ private:
   }
   
 
-  std::optional<size_t> find_label_index(const std::string& label) const {
+  std::optional<size_t> find_label_index(const TensorDimLabel& label) const {
     for(size_t i=0; i<dims_.size(); ++i)
-      if(label_equals(dims_[i].label, label))
+      if (dims_[i].label == label)
         return i;
     return std::nullopt;
   }
-  
+
   static void validate_unique_labels(const std::span<TensorDim>& dims) {
-    std::unordered_set<std::string> seen;
+    std::unordered_set<TensorDimLabel, TensorDimLabelHash> seen;
     for (const auto& d : dims) {
-      const std::string key = label_to_string(d.label);
-      if (!seen.insert(key).second)
-        throw std::invalid_argument("Tensor: duplicate dimension label '" + key + "'");
+      if (!seen.insert(d.label).second)
+        throw std::invalid_argument("Tensor: duplicate dimension label '"
+            + label_to_string(d.label) + "'");
     }
   }
 
@@ -119,14 +119,14 @@ public:
   const std::vector<TensorDim>& dims() const { return dims_; }
   const std::vector<size_t>& strides() const { return strides_; }
 
-  bool has_label(const std::string& label) const {
+  bool has_label(const TensorDimLabel& label) const {
     return find_label_index(label).has_value();
   }
 
-  size_t label_index(const std::string& label) const {
+  size_t label_index(const TensorDimLabel& label) const {
     auto idx = find_label_index(label);
     if (!idx) {
-      throw std::invalid_argument("Tensor: label '" + label + "' not found.");
+      throw std::invalid_argument("Tensor: label '" + label_to_string(label) + "' not found.");
     }
     return *idx;
   }
@@ -195,8 +195,7 @@ public:
   void add_dim(const TensorDim& newdim, bool slow = true, bool fill = false) {
     if (newdim.dim == 0)
       throw std::invalid_argument("Tensor::add_dim: dimension size must be > 0");
-    if (std::holds_alternative<std::string>(newdim.label) &&
-        has_label(label_to_string(newdim.label)))
+    if (has_label(newdim.label))
       throw std::invalid_argument("Tensor::add_dim: duplicate dimension label '"
           + label_to_string(newdim.label) + "'");
 
@@ -221,7 +220,7 @@ public:
   // Contract the last dimension of X (named 'labelX') against the first dimension of Y (named 'labelY') and write the result into Z
   // X, Y, and Z must be on the same Executor (compile-time checked)
   static void gemm(const Tensor& X, const Tensor& Y, Tensor& Z,
-                    const std::string& labelX, const std::string& labelY) {
+                    const TensorDimLabel& labelX, const TensorDimLabel& labelY) {
     // 1. Labels must exist
     const size_t idxX = X.label_index(labelX);
     const size_t idxY = Y.label_index(labelY);
@@ -229,10 +228,10 @@ public:
     // 2. Must be in gemm order
     if (idxX != X.rank() - 1)
       throw std::invalid_argument(
-          "Tensor::gemm: '" + labelX + "' must be the last dimension of X");
+          "Tensor::gemm: '" + label_to_string(labelX) + "' must be the last dimension of X");
     if (idxY != 0)
       throw std::invalid_argument(
-          "Tensor::gemm: '" + labelY + "' must be the first dimension of Y");
+          "Tensor::gemm: '" + label_to_string(labelY) + "' must be the first dimension of Y");
 
     // 3. Contracted dimension sizes must agree
     const size_t K = X.dims_[idxX].dim;

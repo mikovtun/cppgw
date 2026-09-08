@@ -11,3 +11,6 @@
 #include "tensor.hpp"
 #include "transform.hpp"
 
+#include "grid/tau.hpp"
+#include "grid/matsubara.hpp"
+
