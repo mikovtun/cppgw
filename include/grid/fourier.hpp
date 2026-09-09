@@ -51,9 +51,14 @@ namespace detail {
 //        w_t : quadrature weight at tau point t      (=> source grid must be a Quadrature)
 //
 //  The transform is fully defined by the source (tau) grid and the target
-//  (Matsubara) grid, which are captured at construction time. The kernel K is
-//  built once in the constructor when save == true (the default) and reused;
-//  otherwise it is rebuilt on every call.
+//  (Matsubara) grid, which are captured at construction time. `save` (const)
+//  selects the two modes:
+//    save == true  (default): the kernel K is built once in the constructor,
+//                             STORED, and reused by every operator() call.
+//    save == false           : the kernel is NEVER stored (this mode is for when
+//                             storing the matrix would use too much memory);
+//                             operator() computes each K[m,t] element-by-element
+//                             on the fly, directly into the output tensor.
 //
 //    in    : an expansion on a tau grid  (FromExp  = GridExpansionTau<...>)
 //    out   : an expansion on a Matsubara grid (ToExp = GridExpansionMatsubara<...>)
@@ -87,19 +92,23 @@ public:
   using OutputType = ToExp;
   using Scalar     = DataType;
 
-  // Construct a transform between the two grids. `save` keeps the kernel for reuse.
+  // Construct a transform between the two grids. `save` decides the two modes:
+  //   save == true  : the kernel K is built once, STORED, and reused by every call.
+  //   save == false : the kernel is NEVER stored (saves the matrix memory);
+  //                   operator() computes each K[m,t] on the fly into the output.
+  // `save` is fixed at construction (const) and cannot change afterwards.
   FourierTransform(TauGrid tau, MatsuGrid matsu, bool save = true)
-    : tau_grid_(std::move(tau)), matsu_grid_(std::move(matsu))
+    : tau_grid_(std::move(tau)), matsu_grid_(std::move(matsu)), save_(save)
   {
-    if (save)
+    if (save_)
       kernel_ = build_kernel();
   }
 
   // ----- Accessors -----
   const TauGrid&   tau_grid()   const { return tau_grid_; }
   const MatsuGrid& matsu_grid() const { return matsu_grid_; }
-  const TensorOut& kernel()     const { return kernel_; }   // the stored kernel (iff saved())
-  bool             saved()      const { return kernel_.allocated(); }
+  const TensorOut& kernel()     const { return kernel_; }   // the stored kernel (valid iff saved())
+  bool             saved()      const { return save_; }
 
   // The (m, t) element of the transformation kernel, computed directly from the
   // two grids:   K(m, t) = w_t . exp(i omega_m tau_t).   (m: Matsubara, t: tau.)
@@ -135,29 +144,33 @@ public:
     const size_t S = in.total_elements() / T;                  // total number of spatial elements
     TensorOut    out(out_dims);
 
-    // Resolve the kernel: the stored one (save == true) or a freshly built one.
-    TensorOut        local_kernel;
-    const DataType*  K_buf;
-    if (kernel_.allocated()) {
-      K_buf = kernel_.data();
-    } else {
-      local_kernel = build_kernel();
-      K_buf = local_kernel.data();
-    }
-
     // Contract:  out[m, sp] = sum_t K[m, t] * in[sp, t]
-    //   K  : [matsu, tau]      ->  K[m + M*t]
     //   in : [tau,   spatial]  ->  in[t + T*sp]
     //   out: [matsu, spatial]  ->  out[m + M*sp]
     const InScalar* in_buf  = in.data();
     DataType*       out_buf = out.data();
-    for (size_t sp = 0; sp < S; ++sp)
-      for (size_t m = 0; m < M; ++m) {
-        DataType sum{};
-        for (size_t t = 0; t < T; ++t)
-          sum += K_buf[m + M * t] * in_buf[t + T * sp];
-        out_buf[m + M * sp] = sum;
-      }
+
+    if (save_) {
+      // The kernel is stored: contract against the K[m,t] matrix (K: [matsu,tau] -> K[m + M*t]).
+      const DataType* K_buf = kernel_.data();
+      for (size_t sp = 0; sp < S; ++sp)
+        for (size_t m = 0; m < M; ++m) {
+          DataType sum{};
+          for (size_t t = 0; t < T; ++t)
+            sum += K_buf[m + M * t] * in_buf[t + T * sp];
+          out_buf[m + M * sp] = sum;
+        }
+    } else {
+      // No stored kernel: compute each K[m,t] element-by-element on the fly, straight
+      // into the output. This uses no kernel memory, at the cost of recomputing K.
+      for (size_t sp = 0; sp < S; ++sp)
+        for (size_t m = 0; m < M; ++m) {
+          DataType sum{};
+          for (size_t t = 0; t < T; ++t)
+            sum += K(m, t) * in_buf[t + T * sp];
+          out_buf[m + M * sp] = sum;
+        }
+    }
 
     return OutputType(std::move(out), matsu_grid_);
   }
@@ -165,7 +178,8 @@ public:
 private:
   TauGrid   tau_grid_;
   MatsuGrid matsu_grid_;
-  TensorOut kernel_;   // K[m, t]; allocated iff save == true
+  const bool save_{};    // const: whether the kernel is stored; fixed at construction
+  TensorOut kernel_;     // K[m, t]; allocated iff save_ is true
 
   // Build the kernel K[m,t] = w_t exp(i omega_m tau_t) into a [matsu, tau]-labeled
   // tensor (matsu fastest). Uses cos/sin on the real argument and the two-argument
@@ -178,18 +192,14 @@ private:
       TensorDim{ToExp::dim_label, M},     // Matsubara = fastest
       TensorDim{FromExp::dim_label, T}    // tau       = slowest
     };
-    TensorOut K(k_dims);
-    DataType* K_buf = K.data();
+    TensorOut ker(k_dims);
+    DataType* ker_buf = ker.data();
 
-    for (size_t t = 0; t < T; ++t) {
-      const double w     = tau_grid_.weights(t);
-      const double tau_v = tau_grid_(t).value;
-      for (size_t m = 0; m < M; ++m) {
-        const double arg = tau_v * matsu_grid_(m).value;
-        K_buf[m + M * t] = DataType(w * std::cos(arg), w * std::sin(arg));
-      }
-    }
-    return K;
+    for (size_t t = 0; t < T; ++t)
+      for (size_t m = 0; m < M; ++m)
+        ker_buf[m + M * t] = K(m, t);
+
+    return ker;
   }
 };
 

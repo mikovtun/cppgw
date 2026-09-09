@@ -33,6 +33,17 @@ void fourier_tau_to_matsu_check(bool save, const InverseTemperature& beta,
   using OutExp = GridExpansionMatsubara<std::complex<double>, S>;
   FourierTransform<GridExpansionTau<double, UniformImaginaryTimeGrid>, OutExp, std::complex<double>>
       FT(utau, mgrid, save);
+  // Storage behavior must follow the const save flag (Story 1):
+  //   save=true  -> the kernel IS stored;   save=false -> the kernel is NEVER stored.
+  {
+    const bool stored = FT.kernel().allocated();
+    if (stored != save)
+      throw std::runtime_error("FourierTransform: kernel stored " + std::to_string((int)stored)
+          + " but save=" + std::to_string((int)save));
+    if (FT.saved() != save)
+      throw std::runtime_error("FourierTransform: saved()=" + std::to_string((int)FT.saved())
+          + " but save=" + std::to_string((int)save));
+  }
   OutExp out = FT(in);
 
   // Hand-computed reference
