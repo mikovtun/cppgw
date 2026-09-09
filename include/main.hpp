@@ -1,4 +1,8 @@
 #pragma once
+#include <complex>
+#include <algorithm>
+#include <string>
+#include <vector>
 #include "types.hpp"
 #include "common.hpp"
 #include "multiprecision.hpp"
@@ -13,4 +17,5 @@
 
 #include "grid/tau.hpp"
 #include "grid/matsubara.hpp"
+#include "grid/fourier.hpp"
 

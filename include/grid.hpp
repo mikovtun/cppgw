@@ -33,12 +33,17 @@ concept Grid =
     requires std::same_as<decltype(g(0)), typename G::point_type>;
   };
 
-// Quadratures have points and weights
+// Quadratures additionally have weights:
+//   weights()          : the sequence of (real) quadrature weights
+//   weights(i)         : the weight at index i (same real type as weights()[i])
 template <typename G>
 concept Quadrature = 
   Grid<G> && 
   requires(const G& g) {
     g.weights();
+    { g.weights(0) } -> std::convertible_to<double>;
+    requires std::same_as<std::remove_cvref_t<decltype(g.weights(0))>,
+                          std::remove_cvref_t<decltype(g.weights()[0])>>;
   };
 
 

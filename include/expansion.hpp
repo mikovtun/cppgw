@@ -19,6 +19,7 @@ namespace cppgw {
 // Make the numeric concepts visible in the cppgw namespace (as in chebyshev/basis.hpp)
 using numerics::FloatingPoint;
 using numerics::RealFloatingPoint;
+using numerics::ComplexFloatingPoint;
 
 // ============================================================================
 //  Unified interface for Tensor representations of a function on a
@@ -108,6 +109,8 @@ public:
   using space      = ImaginaryTimeSpace;
   using point_type = typename G::point_type;          // == ImaginaryTime
   using DimLabel   = GridDimLabel<space>;
+  using grid_type  = G;
+  using scalar_type = data_type;
 
   // The tensor axis this representation owns; it must be exactly the grid's label.
   inline static constexpr DimLabel dim_label{};
@@ -156,6 +159,7 @@ public:
   using point_type = typename MatsubaraGrid<S>::point_type;   // == ImaginaryFrequency
   using DimLabel   = GridDimLabel<space>;
   using grid_type  = MatsubaraGrid<S>;
+  using scalar_type = data_type;
 
   inline static constexpr DimLabel dim_label{};
   static_assert( std::same_as<std::remove_cvref_t<decltype(grid_type::dim_label)>, DimLabel>,

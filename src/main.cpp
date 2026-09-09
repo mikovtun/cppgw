@@ -1,7 +1,64 @@
 #include "main.hpp"
 
+using namespace cppgw;
+
+// Verify one (statistics, save) configuration of the Fourier transform against
+// a hand-computed reference:   out[m, mu, nu] = sum_t w_t exp(i omega_m tau_t) in[mu, nu, t]
+template <StatisticsTag S>
+void fourier_tau_to_matsu_check(bool save, const InverseTemperature& beta,
+                                size_t T, size_t halfN, size_t mu_n, size_t nu_n) {
+  UniformImaginaryTimeGrid utau(beta, T);
+  MatsubaraGrid<S>         mgrid(halfN, beta);
+  const size_t M = mgrid.size();
+
+  auto in_val = [](size_t mu, size_t nu, size_t t) -> double {
+    return (double)(mu+1) + 10.0*(nu+1) + 100.0*(t+1);
+  };
+
+  // Build the input expansion  in[tau, mu, nu]  (tau = fastest)
+  std::vector<TensorDim> in_dims;
+  in_dims.push_back(TensorDim{utau.dim_label, T});
+  in_dims.push_back(TensorDim{std::string("mu"), mu_n});
+  in_dims.push_back(TensorDim{std::string("nu"), nu_n});
+  Tensor<double, Executor::Host> inT(in_dims);
+  {
+    double* d = inT.data();
+    for (size_t nu = 0; nu < nu_n; ++nu)
+      for (size_t mu = 0; mu < mu_n; ++mu)
+        for (size_t t = 0; t < T; ++t)
+          d[t + T*mu + T*mu_n*nu] = in_val(mu, nu, t);   // strides: tau=1, mu=T, nu=T*mu_n
+  }
+  GridExpansionTau<double, UniformImaginaryTimeGrid> in(inT, utau);
+
+  using OutExp = GridExpansionMatsubara<std::complex<double>, S>;
+  FourierTransform<GridExpansionTau<double, UniformImaginaryTimeGrid>, OutExp, std::complex<double>>
+      FT(utau, mgrid, save);
+  OutExp out = FT(in);
+
+  // Hand-computed reference
+  const std::complex<double>* odata = out.data().data();
+  double maxerr = 0.0;
+  for (size_t nu = 0; nu < nu_n; ++nu)
+    for (size_t mu = 0; mu < mu_n; ++mu)
+      for (size_t m = 0; m < M; ++m) {
+        std::complex<double> ref{};
+        for (size_t t = 0; t < T; ++t) {
+          const double arg = utau(t).value * mgrid(m).value;
+          ref += std::complex<double>(utau.weights(t)*std::cos(arg),
+                                      utau.weights(t)*std::sin(arg)) * in_val(mu, nu, t);
+        }
+        const std::complex<double> got = odata[m + M*mu + M*mu_n*nu];   // strides: matsu=1, mu=M, nu=M*mu_n
+        maxerr = std::max(maxerr, std::abs(got - ref));
+      }
+  std::cout << "  " << (std::is_same_v<S, Fermionic> ? "Fermionic " : "Bosonic  ")
+            << "save=" << (save ? "true " : "false")
+            << ": rank=" << out.data().rank()
+            << " [matsu=" << M << ", mu=" << mu_n << ", nu=" << nu_n
+            << "]  max|err|=" << maxerr
+            << (maxerr < 1e-12 ? "  OK" : "  ** MISMATCH **") << std::endl;
+}
+
 int main(int argc, char** argv) {
-  using namespace cppgw;
   static_assert(Grid<MatsubaraGrid<Fermionic>>);
   auto beta = InverseTemperature(10.0);
   MatsubaraGrid<Fermionic> fgrid(4, beta);
@@ -90,6 +147,16 @@ int main(int argc, char** argv) {
   std::cout << "From spatial shape:  " << CEM_s.data() << std::endl;
   ChebyshevExpansionMatsubara<double, Fermionic> CEM_t(matrix3, 8);
   std::cout << "From spatial tensor: " << CEM_t.data() << std::endl;
+
+  // ---- FourierTransform (tau -> Matsubara), verified against a hand computation ----
+  std::cout << "\n--- FourierTransform (tau -> Matsubara) ---" << std::endl;
+  {
+    const size_t T = 4, halfN = 2, mu_n = 2, nu_n = 3;   // halfN=2 -> 4 Fermionic / 5 Bosonic points
+    fourier_tau_to_matsu_check<Fermionic>(/*save=*/true,  beta, T, halfN, mu_n, nu_n);
+    fourier_tau_to_matsu_check<Fermionic>(/*save=*/false, beta, T, halfN, mu_n, nu_n);
+    fourier_tau_to_matsu_check<Bosonic>  (/*save=*/true,  beta, T, halfN, mu_n, nu_n);
+    fourier_tau_to_matsu_check<Bosonic>  (/*save=*/false, beta, T, halfN, mu_n, nu_n);
+  }
 
   return 0;
 }

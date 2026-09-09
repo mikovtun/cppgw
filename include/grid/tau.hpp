@@ -60,6 +60,7 @@ public:
 
   const std::vector<point_type>& points()  const { return points_; }
   const std::vector<double>&        weights() const { return weights_; }
+  const double        weights(size_t i) const { return weights_[i]; }
 };
 
 // ---------------------------------------------------------------------------
@@ -134,6 +135,7 @@ public:
 
   const std::vector<point_type>& points()  const { return points_; }
   const std::vector<double>&        weights() const { return weights_; }
+  const double        weights(size_t i) const { return weights_[i]; }
 };
 
 // ---------------------------------------------------------------------------
