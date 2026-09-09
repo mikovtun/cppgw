@@ -122,7 +122,7 @@ public:
 
   // Apply the transform to a tau-represented function; return the Matsubara expansion.
   OutputType operator()(const InputType& input) const {
-    const auto& in = input.data();
+    const auto& in = input.data();   // The Tensor data
     const size_t T = tau_grid_.size();
     const size_t M = matsu_grid_.size();
 
@@ -155,15 +155,15 @@ public:
       out_dims.push_back(in.dims()[i]);                        // unchanged spatial dims
     TensorOut out(out_dims);
 
-    const size_t    S       = in.total_elements() / T;        // total number of spatial elements
-    const InScalar* in_buf  = in.data();                       // in[sp, t]  -> in[t + T*sp]
-    DataType*       out_buf = out.data();                      // out[m, sp] -> out[m + M*sp]
+    const size_t S = in.total_elements() / T;        // total number of spatial elements
     for (size_t sp = 0; sp < S; ++sp)
       for (size_t m = 0; m < M; ++m) {
         DataType sum{};
         for (size_t t = 0; t < T; ++t)
-          sum += K(m, t) * in_buf[t + T * sp];
-        out_buf[m + M * sp] = sum;
+          // in  : [tau, <spatial...>]   tau fastest (stride 1) -> offset (t + T*sp)
+          sum += K(m, t) * in.linear(t + T * sp);
+        // out: [matsu, <spatial...>]   matsu fastest (stride 1) -> offset (m + M*sp)
+        out.linear(m + M * sp) = sum;
       }
     return OutputType(std::move(out), matsu_grid_);
   }

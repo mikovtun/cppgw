@@ -2,6 +2,28 @@
 
 using namespace cppgw;
 
+// Tensor::operator() is host-only (device storage cannot be touched from the
+// host). It is constrained to `Executor::Host`, so any call on a `Tensor<...,Device>`
+// is a compile error (it is not a candidate). We can positively static_assert the
+// host case below; the device-negative case is intentionally NOT asserted here, because
+// forming that call is itself ill-formed (no viable `operator()`), which a
+// `static_assert(!requires(...))` cannot express without making this TU a hard error.
+static_assert( requires(Tensor<double, Executor::Host> h)   { h(0, 0); });
+
+namespace {
+// Exception-checking helpers: true iff f() throws exactly T (any other throw, or no
+// throw, returns false).
+template <typename T, typename F>
+bool throws_as(F&& f) {
+  try { f(); }
+  catch (const T&) { return true; }
+  catch (...) { /* a throw, but of the wrong type */ }
+  return false;
+}
+template <typename F> bool throws_oor(F&& f) { return throws_as<std::out_of_range>(std::forward<F>(f)); }
+template <typename F> bool throws_ia (F&& f) { return throws_as<std::invalid_argument>(std::forward<F>(f)); }
+} // namespace
+
 // Verify one (statistics, save) configuration of the Fourier transform against
 // a hand-computed reference:   out[m, mu, nu] = sum_t w_t exp(i omega_m tau_t) in[mu, nu, t]
 template <StatisticsTag S>
@@ -117,10 +139,10 @@ int main(int argc, char** argv) {
     // Y: [k=3 fast, b=2 slow]  complex      B[k,j] = (2k+j+1) + i*(2k+j+1)
     Tensor<cplx, Executor::Host>      B({{"k", 3}, {"b", 2}});
     {
-      double* a = A.data();
+      // Write through Tensor::operator() (arg #k indexes dim k: i is "a", k is "k").
       for (size_t k = 0; k < 3; ++k)
         for (size_t i = 0; i < 2; ++i)
-          a[i + k*2] = 3.0*i + k + 1.0;                 // A: i fast (stride 1), k (stride 2)
+          A(i, k) = 3.0*i + k + 1.0;                   // A: i fast (stride 1), k (stride 2)
     }
     {
       cplx* b = B.data();
@@ -137,14 +159,53 @@ int main(int argc, char** argv) {
     //            C[1][0]=49+49i C[1][1]=64+64i
     const cplx Cexp[2][2] = {{ cplx(22,22), cplx(28,28) },
                              { cplx(49,49), cplx(64,64) }};
-    const cplx* c = C.data();
     double maxerr = 0.0;
     for (size_t j = 0; j < 2; ++j)
       for (size_t i = 0; i < 2; ++i)
-        maxerr = std::max(maxerr, std::abs(c[i + j*2] - Cexp[i][j]));   // C: i fast, j (stride 2)
+        maxerr = std::max(maxerr, std::abs(C(i, j) - Cexp[i][j]));   // read back via operator()
     std::cout << "\nMixed-type gemm (real x complex -> complex):\n";
     std::cout << C << std::endl;
     std::cout << " max|err|=" << maxerr << (maxerr < 1e-12 ? "  OK" : "  ** MISMATCH **") << std::endl;
+  }
+
+  // ---- Tensor::operator(): read/write, bounds checks (Story 3) ----
+  {
+    // X dims (fast->slow): [x0=2, x1=3, x2=4];  storage offset = i + 2*j + 6*k.
+    Tensor<double, Executor::Host> X({{"x0", 2}, {"x1", 3}, {"x2", 4}});
+    for (size_t k = 0; k < 4; ++k)
+      for (size_t j = 0; j < 3; ++j)
+        for (size_t i = 0; i < 2; ++i)
+          X(i, j, k) = 1.0 + 10.0*j + 100.0*k;
+    // Read the whole array back; must equal the values written through operator().
+    double maxerr = 0.0;
+    for (size_t k = 0; k < 4; ++k)
+      for (size_t j = 0; j < 3; ++j)
+        for (size_t i = 0; i < 2; ++i)
+          maxerr = std::max(maxerr, std::abs(X(i, j, k) - (1.0 + 10.0*j + 100.0*k)));
+    // Const overload (read-only).
+    const Tensor<double, Executor::Host>& Xc = X;
+    const bool const_ok = (Xc(1, 2, 3) == 321.0);       // 1 + 2*10 + 3*100
+    // Out-of-bounds indices must throw std::out_of_range.
+    const bool oor_eq  = throws_oor([&]{ X(2, 0, 0); });   // i  == dim size
+    const bool oor_mid = throws_oor([&]{ X(0, 3, 0); });   // j  out of range
+    const bool oor_far = throws_oor([&]{ X(0, 0, 99); });  // k  far out
+    const bool oor_neg = throws_oor([&]{ X(-1, 0, 0); });  // negative (signed) arg
+    // Wrong index count throws std::invalid_argument.
+    const bool bad_arity1 = throws_ia([&]{ X(0, 0); });    // too few
+    const bool bad_arity2 = throws_ia([&]{ X(0, 0, 0, 0); });  // too many
+    const bool all_ok = (maxerr < 1e-12) && const_ok && oor_eq && oor_mid
+                     && oor_far && oor_neg && bad_arity1 && bad_arity2;
+    std::cout << "\n--- Tensor operator() ---\n";
+    std::cout << "  X(1,2,3)   = " << X(1, 2, 3) << "   (expected 321)\n";
+    std::cout << "  const X(1,2,3) = " << Xc(1, 2, 3) << "   (expected 321)\n";
+    std::cout << "  full read/write sweep max|err| = " << maxerr
+              << (maxerr < 1e-12 ? "  OK" : "  ** MISMATCH **") << std::endl;
+    std::cout << "  out_of_range (i==dim size / j oob / k oob / negative): "
+              << (oor_eq && oor_mid && oor_far && oor_neg
+                  ? "  OK" : "  ** FAIL **") << std::endl;
+    std::cout << "  wrong index count throws invalid_argument: "
+              << (bad_arity1 && bad_arity2 ? "  OK" : "  ** FAIL **") << std::endl;
+    if (!all_ok) throw std::runtime_error("Tensor::operator() checks failed");
   }
 
   // Test chebyshev machinery

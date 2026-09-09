@@ -72,6 +72,40 @@ private:
 
   void validate_unique_labels() const { validate_unique_labels(dims_); }
 
+  // Shared by both operator() overloads: validates the index count and the
+  // bounds of each index, and returns the linear storage offset. Argument #k
+  // indexes dimension k in the tensor's own (fast->slow) order.
+  template <typename... Idx>
+  requires ((std::convertible_to<Idx, size_t> && ...))
+  size_t element_offset(Idx... idx) const {
+    static_assert(sizeof...(Idx) > 0, "Tensor::operator() needs at least one index");
+    const size_t ii[sizeof...(Idx)] = { static_cast<size_t>(idx)... };
+    if (sizeof...(Idx) != rank())
+      throw std::invalid_argument("Tensor::operator(): expected " + std::to_string(rank())
+          + " index/indices (one per dimension, fast->slow order), but got "
+          + std::to_string(sizeof...(Idx)));
+    size_t off = 0;
+    for (size_t a = 0; a < sizeof...(Idx); ++a) {
+      if (ii[a] >= dims_[a].dim)
+        throw std::out_of_range("Tensor::operator(): index " + std::to_string(ii[a])
+            + " is out of range for dimension '" + label_to_string(dims_[a].label)
+            + "' (size " + std::to_string(dims_[a].dim) + ")");
+      off += ii[a] * strides_[a];
+    }
+    return off;
+  }
+
+  // Shared by both linear() overloads: checks the tensor is allocated and that the
+  // linear (flat, rank-agnostic) offset is within bounds. Used for single-offset
+  // element access (complements the per-dimension operator()).
+  void check_linear(size_t linear_offset) const {
+    if (!buffer_)
+      throw std::logic_error("Tensor::linear(): tensor is not yet allocated");
+    if (linear_offset >= total_elements_)
+      throw std::out_of_range("Tensor::linear(): linear index " + std::to_string(linear_offset)
+          + " is out of range (tensor size " + std::to_string(total_elements_) + ")");
+  }
+
   // Printing
   void print_data(std::ostream& os, size_t dim, size_t offset) const {
     const size_t n = dims_[dim].dim;
@@ -175,6 +209,46 @@ public:
   // Handle to the underlying storage buffer (used by the LinAlgBackend kernels)
   Buffer&       buffer()       { if (!buffer_) throw std::logic_error("Tensor::buffer(): tensor is not yet allocated"); return *buffer_; }
   const Buffer& buffer() const { if (!buffer_) throw std::logic_error("Tensor::buffer(): tensor is not yet allocated"); return *buffer_; }
+
+  /// @brief Direct element access, resolving through the tensor's own storage order:
+  ///        the `k`th argument indexes dimension `k` in the tensor's (fast->slow)
+  ///        dimension order, so the first argument is the fastest axis.
+  ///        E.g. for a rank 4 tensor `X`, `X(1,5,3,20)` is a valid call (if all
+  ///        indices are in range).
+  /// @throws std::out_of_range     if an index is out of range for its dimension
+  /// @throws std::invalid_argument if the number of indices differs from the rank
+  /// @note  Defined only for `Executor::Host` - the overload is not a candidate
+  ///         for device tensors, since device storage cannot be touched from the
+  ///         host.
+  template <typename... Idx>
+  requires (std::same_as<exec, Executor::Host> && (std::convertible_to<Idx, size_t> && ...))
+  scalar_type& operator()(Idx... idx) {
+    return buffer().data()[element_offset(idx...)];
+  }
+  template <typename... Idx>
+  requires (std::same_as<exec, Executor::Host> && (std::convertible_to<Idx, size_t> && ...))
+  const scalar_type& operator()(Idx... idx) const {
+    return buffer().data()[element_offset(idx...)];
+  }
+
+  /// @brief Element access by a single *linear storage* index: `linear(n)` returns
+  ///        the element at flat offset `n` in storage order (`linear(0)` is the first
+  ///        element, `linear(n+1)` the next, ...). Bounds-checked.
+  ///        The complement of the per-dimension `operator()`: it takes ONE flat,
+  ///        rank-agnostic offset rather than one index per dimension, so it composes
+  ///        with loops that treat a block of trailing dimensions as one contiguous
+  ///        chunk (e.g. the tau--Matsubara contraction over spatial blocks).
+  /// @throws std::out_of_range if `n >= total_elements()`
+  /// @note  Defined only for `Executor::Host` - device storage cannot be touched
+  ///         from the host, and this is then not a viable candidate either.
+  scalar_type& linear(size_t linear_offset) requires std::same_as<exec, Executor::Host> {
+    check_linear(linear_offset);
+    return buffer().data()[linear_offset];
+  }
+  const scalar_type& linear(size_t linear_offset) const requires std::same_as<exec, Executor::Host> {
+    check_linear(linear_offset);
+    return buffer().data()[linear_offset];
+  }
 
   // Shape an output tensor to `dims`: allocate + zero-initialize it if it is not yet
   // allocated, or validate that it already matches if it is. Used by operations
