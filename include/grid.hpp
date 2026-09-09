@@ -18,12 +18,19 @@ concept GridPoint =
   { x.value } -> std::convertible_to<double>;
   };
 
-// Grids have points
+// Grids expose:
+//   points()          : the set of grid points
+//   size()            : the number of points
+//   dim_label         : the tensor label to use for the grid axis
+//   operator()(i)     : the i-th grid point (of type point_type)
 template <typename G>
 concept Grid = 
   requires(const G& g) {
     g.points();
+    g.size();
     g.dim_label;
+    g(0);
+    requires std::same_as<decltype(g(0)), typename G::point_type>;
   };
 
 // Quadratures have points and weights

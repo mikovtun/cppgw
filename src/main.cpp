@@ -6,14 +6,20 @@ int main(int argc, char** argv) {
   auto beta = InverseTemperature(10.0);
   MatsubaraGrid<Fermionic> fgrid(4, beta);
   MatsubaraGrid<Bosonic> bgrid(4, beta);
-  std::cout << "Fermionic grid" << std::endl;
-  for(auto& p : fgrid.full_points()) 
+  std::cout << "Fermionic grid (size " << fgrid.size() << "):\n";
+  for(auto& p : fgrid.points()) 
     std::cout << p.value << " ";
-  std::cout << std::endl << "Bosonic grid" << std::endl;
-  for(auto& p : bgrid.full_points()) 
+  std::cout << std::endl << "Bosonic grid (size " << bgrid.size() << "):\n";
+  for(auto& p : bgrid.points()) 
+    std::cout << p.value << " ";
+  std::cout << std::endl << "Bosonic points_no_zero:\n";
+  for(auto& p : bgrid.points_no_zero()) 
     std::cout << p.value << " ";
   std::cout << std::endl;
-  std::cout << bgrid.N() << std::endl;
+  // operator(size_t) indexes into the full set (zero mode in the middle for Bosonic)
+  std::cout << "bgrid(0)=" << bgrid(0).value
+            << "  bgrid(4) [zero mode]=" << bgrid(4).value
+            << "  bgrid(8)=" << bgrid(8).value << std::endl;
 
   std::cout << "Tensor test" << std::endl;
   size_t N = 6;
@@ -46,8 +52,44 @@ int main(int argc, char** argv) {
   std::cout << "ChebExpTau data: " << CET.data() << std::endl;
   ChebyshevExpansionTau<double> CET2(matrix3, 8);
   std::cout << "ChebExpTau matrix1: " << CET2.data() << std::endl;
-  
 
+  // Test the GridExpansionTau machinery (a spatial Green's function on a uniform tau grid)
+  UniformImaginaryTimeGrid utau(beta, 4);   // 4 grid points in (0, beta)
+  std::cout << "\n--- GridExpansionTau ---" << std::endl;
+  std::cout << "grid: " << utau.size() << " points" << std::endl;
+
+  // (1) Build from a spatial tensor -> the grid axis is added as the fastest, data broadcast
+  Tensor<double, Executor::Host> spatial({{"mu", 2}, {"nu", 2}});
+  for (int i = 0; i < spatial.total_elements(); ++i)
+    spatial.data()[i] = i + 1;
+  GridExpansionTau<double, UniformImaginaryTimeGrid> GE_tensor(spatial, utau);
+  std::cout << "From spatial tensor: " << GE_tensor.data() << std::endl;
+  std::cout << "  grid point at index 0: tau = " << GE_tensor(0).value << std::endl;
+
+  // (2) Build from a spatial shape -> allocated all-zero
+  GridExpansionTau<double, UniformImaginaryTimeGrid> GE_shape(
+      TensorShape{{"mu", 2}, {"nu", 2}}, utau);
+  std::cout << "From spatial shape:  " << GE_shape.data() << std::endl;
+
+  // Test the unified interface on the Matsubara (ImaginaryFrequency) space
+  MatsubaraGrid<Fermionic> mgrid(4, beta);   // 8 Matsubara points
+  Tensor<double, Executor::Host> mspatial({{"mu", 2}, {"nu", 2}});
+  for (int i = 0; i < mspatial.total_elements(); ++i)
+    mspatial.data()[i] = i + 1;
+
+  std::cout << "\n--- GridExpansionMatsubara ---" << std::endl;
+  std::cout << "grid: " << mgrid.size() << " points" << std::endl;
+  GridExpansionMatsubara<double, Fermionic> GEM_t(mspatial, mgrid);
+  std::cout << "From spatial tensor: " << GEM_t.data() << std::endl;
+  GridExpansionMatsubara<double, Fermionic> GEM_s(TensorShape{{"mu", 2}, {"nu", 2}}, mgrid);
+  std::cout << "From spatial shape:  " << GEM_s.data() << std::endl;
+
+  std::cout << "\n--- ChebyshevExpansionMatsubara ---" << std::endl;
+  std::cout << "coeff axis: " << 9 << " (order 8)" << std::endl;
+  ChebyshevExpansionMatsubara<double, Fermionic> CEM_s(shape1, 8);
+  std::cout << "From spatial shape:  " << CEM_s.data() << std::endl;
+  ChebyshevExpansionMatsubara<double, Fermionic> CEM_t(matrix3, 8);
+  std::cout << "From spatial tensor: " << CEM_t.data() << std::endl;
 
   return 0;
 }

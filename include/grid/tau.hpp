@@ -194,25 +194,4 @@ static_assert( ImaginaryTimeGrid<UniformImaginaryTimeGrid>);
 static_assert( ImaginaryTimeGrid<ChebyshevNodeImaginaryTimeGrid>);
 static_assert( ImaginaryTimeGrid<GaussLegendreImaginaryTimeGrid>);
 
-
-
-// ---------------------------------------------------------------------------
-// Tensor Valued Grids (data owning)
-// ---------------------------------------------------------------------------
-template <FloatingPoint data_type, ImaginaryTimeGrid G>
-class GridExpansionTau {
-public:
-  using space = ImaginaryTimeSpace;
-private:
-  Tensor<data_type, Executor::Host> data_;
-  G grid_;
-public:
-  GridExpansionTau() = delete;
-  // Constructor: Build from pre-existing tensor with G::dim_label dimension and corresponding Grid
-  explicit GridExpansionTau(Tensor<data_type, Executor::Host> d_in, G g_in) : grid_(g_in) {
-    // Make sure the dim_label is correct
-    //d_in.
-  }
-};
-
 }

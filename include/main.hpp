@@ -3,7 +3,7 @@
 #include "common.hpp"
 #include "multiprecision.hpp"
 #include "grid.hpp"
-#include "representation.hpp"
+#include "expansion.hpp"
 #include "chebyshev/basis.hpp"
 #include "chebyshev/tensor.hpp"
 #include "linalgbackend.hpp"

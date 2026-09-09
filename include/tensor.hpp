@@ -7,6 +7,7 @@
 #include <string>
 #include <memory>
 #include <numeric>
+#include <algorithm>
 #include <stdexcept>
 #include <optional>
 #include <span>
@@ -110,8 +111,36 @@ public:
   // Accept brace-enclosed initializer lists too
   Tensor(std::initializer_list<TensorDim> inputDims) : dims_(inputDims) { compute_strides(); allocate(); }
 
-  // Copies should be disabled? Shallow by default? Provide deepcopy function?
-  // Moves should be allowed
+  // ----- Copy / move semantics -----
+  // A copied Tensor has INDEPENDENT (deep) storage: copying never aliases the
+  // underlying (resizable) buffer, so mutating a copy (e.g. add_dim -> resize)
+  // cannot corrupt another Tensor that still references the original data.
+  // Moves steal storage (zero copy). This is what makes the by-value "adopt"
+  // constructors in expansion.hpp safe.
+  Tensor(const Tensor& o)
+    : dims_(o.dims_), strides_(o.strides_), total_elements_(o.total_elements_) {
+    if (o.buffer_) {
+      buffer_ = std::make_shared<Buffer>(total_elements_);
+      if (total_elements_ > 0)
+        std::copy(o.data(), o.data() + total_elements_, buffer_->data());
+    }
+  }
+  Tensor(Tensor&& o) noexcept = default;
+  Tensor& operator=(const Tensor& o) {
+    if (this == &o) return *this;
+    dims_ = o.dims_;
+    strides_ = o.strides_;
+    total_elements_ = o.total_elements_;
+    if (o.buffer_) {
+      buffer_ = std::make_shared<Buffer>(total_elements_);
+      if (total_elements_ > 0)
+        std::copy(o.data(), o.data() + total_elements_, buffer_->data());
+    } else {
+      buffer_ = nullptr;
+    }
+    return *this;
+  }
+  Tensor& operator=(Tensor&& o) noexcept = default;
 
   // ----- Layout -----
   size_t total_elements() const { return total_elements_; }
