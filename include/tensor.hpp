@@ -15,6 +15,7 @@
 #include <ranges>
 #include <iostream>
 #include <typeinfo>
+#include <sstream>
 
 namespace cppgw {
 // This file specifies the Tensor class, which provides a generic interface for storing arbitrary-rank
@@ -34,7 +35,6 @@ namespace cppgw {
 template <typename scalar_type, typename exec>
 class Tensor {
   using Buffer  = TensorBuffer<scalar_type, exec>;
-  using Backend = LinAlgBackend<scalar_type, exec>;
 private:
   // Layout information
   std::vector<TensorDim>  dims_;      // Order: fastest to slowest
@@ -172,6 +172,31 @@ public:
   scalar_type*          data()        { return buffer_ ? buffer_->data() : nullptr; }
   const scalar_type*    data() const  { return buffer_ ? buffer_->data() : nullptr; }
 
+  // Handle to the underlying storage buffer (used by the LinAlgBackend kernels)
+  Buffer&       buffer()       { if (!buffer_) throw std::logic_error("Tensor::buffer(): tensor is not yet allocated"); return *buffer_; }
+  const Buffer& buffer() const { if (!buffer_) throw std::logic_error("Tensor::buffer(): tensor is not yet allocated"); return *buffer_; }
+
+  // Shape an output tensor to `dims`: allocate + zero-initialize it if it is not yet
+  // allocated, or validate that it already matches if it is. Used by operations
+  // (mixed-type gemm, ...) that write their result into this tensor. `dims` is
+  // taken by value (moved in on allocation) and is only read otherwise.
+  void prepare_output(std::vector<TensorDim> dims, const char* what = "Tensor") {
+    validate_unique_labels(std::span<TensorDim>{dims});
+    if (!allocated()) {
+      dims_           = std::move(dims);
+      compute_strides();
+      allocate();
+    } else {
+      if (rank() != dims.size())
+        throw std::invalid_argument(std::string(what) + ": output has wrong rank");
+      for (size_t i = 0; i < dims.size(); ++i)
+        if (dims_[i] != dims[i])
+          throw std::invalid_argument(std::string(what) + ": output dim '"
+              + label_to_string(dims_[i].label) + "' incompatible with expected '"
+              + label_to_string(dims[i].label) + "'");
+    }
+  }
+
   // ----- Printers -----
   void print(std::ostream& os = std::cout) const {
     // Metadata
@@ -245,73 +270,70 @@ public:
   }
 
   // ----- Operations -----
-  
-  // Contract the last dimension of X (named 'labelX') against the first dimension of Y (named 'labelY') and write the result into Z
-  // X, Y, and Z must be on the same Executor (compile-time checked)
-  static void gemm(const Tensor& X, const Tensor& Y, Tensor& Z,
-                    const TensorDimLabel& labelX, const TensorDimLabel& labelY) {
-    // 1. Labels must exist
-    const size_t idxX = X.label_index(labelX);
-    const size_t idxY = Y.label_index(labelY);
-
-    // 2. Must be in gemm order
-    if (idxX != X.rank() - 1)
-      throw std::invalid_argument(
-          "Tensor::gemm: '" + label_to_string(labelX) + "' must be the last dimension of X");
-    if (idxY != 0)
-      throw std::invalid_argument(
-          "Tensor::gemm: '" + label_to_string(labelY) + "' must be the first dimension of Y");
-
-    // 3. Contracted dimension sizes must agree
-    const size_t K = X.dims_[idxX].dim;
-    if (Y.dims_[idxY].dim != K) {
-      std::ostringstream oss;
-      oss << "Tensor::gemm: contracted dimension size mismatch (" << labelX << "=" << K
-        << " vs " << labelY << "=" << Y.dims_[idxY].dim << ")";
-      throw std::invalid_argument(oss.str());
-    }
-
-    // 4. Output shape: X's dims minus labelX, Y's dims minus labelY.
-    // Collect product of X's surviving dims = M
-    // Collect product of Y's surviving dims = N
-    std::vector<TensorDim> result_dims;
-    result_dims.reserve(X.rank() - 1 + Y.rank() - 1);
-    size_t M = 1;
-    for (size_t i=0; i<X.rank()-1; ++i) {
-      result_dims.push_back(X.dims_[i]);
-      M *= X.dims_[i].dim;
-    }
-    size_t N = 1;
-    for (size_t i=1; i<Y.rank(); ++i) {
-      result_dims.push_back(Y.dims_[i]);
-      N *= Y.dims_[i].dim;
-    }
-    // Guard against X and Y shaing a surviving label
-    validate_unique_labels(result_dims);
-
-    // 4. Allocate or validate Z
-    // Throw if Z is already allocated and has unexpected dims
-    if (!Z.allocated()) {
-      Z.dims_ = std::move(result_dims);
-      Z.compute_strides();
-      Z.allocate();
-    } else {
-      if(Z.dims_.size() != result_dims.size()) 
-        throw std::invalid_argument("Tensor::gemm: output has wrong rank");
-      for (size_t i=0; i < result_dims.size(); ++i) {
-        if (Z.dims_[i] != result_dims[i])
-          throw std::invalid_argument("Tensor::gemm: output dim '"
-              + label_to_string(Z.dims_[i].label) + "' is incompatible with expected '"
-              + label_to_string(result_dims[i].label) + "'");
-      }
-    }
-
-    // Hand off to backend
-    Backend::gemm(*X.buffer_, M, K, *Y.buffer_, N, *Z.buffer_);
-  }
-  
+  // Linear algebra is provided by the free function gemm(...), defined below with the
+  // class. It is the mixed-type entry point (X, Y, Z may have different scalar types).
 
 };
+
+// ============================================================================
+//  Mixed-type gemm (Tensor frontend)
+// ----------------------------------------------------------------------------
+// Contract the last dimension of X (named labelX) against the first dimension of Y
+// (named labelY), writing the result into Z.
+//   * X's labelX must be its last (slowest) dimension,
+//   * Y's labelY must be its  first (fastest) dimension,
+//   * X, Y, Z may have different scalar types; the arithmetic is carried out in
+//     Z's scalar type (the output type) -- see LinAlgBackend::gemm.
+// Z's resulting shape is (X minus labelX) followed by (Y minus labelY); Z is
+// allocated (and zero-initialized) if it is not already.
+template <typename TX, typename TY, typename TZ, typename Exec>
+void gemm(const Tensor<TX, Exec>& X,
+          const Tensor<TY, Exec>& Y,
+                Tensor<TZ, Exec>& Z,
+          const TensorDimLabel& labelX,
+          const TensorDimLabel& labelY) {
+  // 1. Labels must exist
+  const size_t idxX = X.label_index(labelX);
+  const size_t idxY = Y.label_index(labelY);
+
+  // 2. Must be in gemm order
+  if (idxX != X.rank() - 1)
+    throw std::invalid_argument("gemm: '"
+        + label_to_string(labelX) + "' must be the last dimension of X");
+  if (idxY != 0)
+    throw std::invalid_argument("gemm: '"
+        + label_to_string(labelY) + "' must be the first dimension of Y");
+
+  // 3. Contracted dimension sizes must agree
+  const size_t K = X.dims()[idxX].dim;
+  if (Y.dims()[idxY].dim != K) {
+    std::ostringstream oss;
+    oss << "gemm: contracted dimension size mismatch (" << labelX << "=" << K
+        << " vs " << labelY << "=" << Y.dims()[idxY].dim << ")";
+    throw std::invalid_argument(oss.str());
+  }
+
+  // 4. Output shape: X's dims minus labelX, Y's dims minus labelY.
+  std::vector<TensorDim> result_dims;
+  result_dims.reserve((X.rank() - 1) + (Y.rank() - 1));
+  size_t M = 1;
+  for (size_t i = 0; i + 1 < X.rank(); ++i) {
+    result_dims.push_back(X.dims()[i]);
+    M *= X.dims()[i].dim;
+  }
+  size_t N = 1;
+  for (size_t i = 1; i < Y.rank(); ++i) {
+    result_dims.push_back(Y.dims()[i]);
+    N *= Y.dims()[i].dim;
+  }
+
+  // 5. Shape/allocate the output, then delegate the arithmetic to the (mixed-type) backend
+  Z.prepare_output(result_dims, "gemm");
+  LinAlgBackend<TZ, Exec>::template gemm<TX, TY>(
+      X.buffer(), M, K,
+      Y.buffer(), N,
+      Z.buffer());
+}
 
 
 

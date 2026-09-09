@@ -106,9 +106,46 @@ int main(int argc, char** argv) {
     *(matrix2.data() + i) = i+1;
   matrix1.print();
   Tensor<double, Executor::Host> matrix3;
-  Tensor<double, Executor::Host>::gemm(matrix1, matrix2, matrix3,
-                                        "y", "x");
+  gemm(matrix1, matrix2, matrix3, "y", "x");
   matrix3.print();
+
+  // ---- Mixed-type gemm:  real (X) x complex (Y) -> complex (Z) ----
+  {
+    using cplx = std::complex<double>;
+    // X: [a=2 fast, k=3 slow]  real          A[i,k] = 3i + k + 1
+    Tensor<double, Executor::Host>    A({{"a", 2}, {"k", 3}});
+    // Y: [k=3 fast, b=2 slow]  complex      B[k,j] = (2k+j+1) + i*(2k+j+1)
+    Tensor<cplx, Executor::Host>      B({{"k", 3}, {"b", 2}});
+    {
+      double* a = A.data();
+      for (size_t k = 0; k < 3; ++k)
+        for (size_t i = 0; i < 2; ++i)
+          a[i + k*2] = 3.0*i + k + 1.0;                 // A: i fast (stride 1), k (stride 2)
+    }
+    {
+      cplx* b = B.data();
+      for (size_t j = 0; j < 2; ++j)
+        for (size_t k = 0; k < 3; ++k) {
+          const double v = 2.0*k + j + 1.0;
+          b[k + j*3] = cplx(v, v);                      // B: k fast (stride 1), j (stride 3)
+        }
+    }
+    Tensor<cplx, Executor::Host> C;   // gemm will shape + allocate [a, b]
+    gemm(A, B, C, "k", "k");
+    // expected   C[i,j] = sum_k A[i,k] * B[k,j]
+    //            C[0][0]=22+22i C[0][1]=28+28i
+    //            C[1][0]=49+49i C[1][1]=64+64i
+    const cplx Cexp[2][2] = {{ cplx(22,22), cplx(28,28) },
+                             { cplx(49,49), cplx(64,64) }};
+    const cplx* c = C.data();
+    double maxerr = 0.0;
+    for (size_t j = 0; j < 2; ++j)
+      for (size_t i = 0; i < 2; ++i)
+        maxerr = std::max(maxerr, std::abs(c[i + j*2] - Cexp[i][j]));   // C: i fast, j (stride 2)
+    std::cout << "\nMixed-type gemm (real x complex -> complex):\n";
+    std::cout << C << std::endl;
+    std::cout << " max|err|=" << maxerr << (maxerr < 1e-12 ? "  OK" : "  ** MISMATCH **") << std::endl;
+  }
 
   // Test chebyshev machinery
   ChebyshevBasisImpl<numerics::float50> CB(5);

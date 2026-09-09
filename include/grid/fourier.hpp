@@ -65,10 +65,12 @@ namespace detail {
 //    K / out scalar type: DataType (complex). DataType must equal ToExp's scalar
 //    type so the result can be adopted into ToExp.
 //
-//  NOTE: the existing Tensor::gemm routes through a single-scalar-type backend,
-//  which cannot multiply a complex kernel against a (possibly) real input. We
-//  therefore contract explicitly (mixed type), which is type-general and handles
-//  spatial ranks directly.
+//  The two modes use different machinery:
+//    save == true  -> gemm(...) (the mixed-type Tensor/LinAlgBackend matrix product)
+//                     contracts the stored, complex kernel against the (possibly real)
+//                     input; the arithmetic is done in the output (complex) type.
+//    save == false -> no kernel is available (it is never stored), so each K[m,t] is
+//                     computed on the fly and accumulated directly into the output.
 // ============================================================================
 template <detail::FromGridExpansion FromExp,
           detail::ToGridExpansion   ToExp,
@@ -133,45 +135,36 @@ public:
           + std::to_string(in.dims()[0].dim)
           + ") does not match the source tau grid (" + std::to_string(T) + ")");
 
-    // Build the output layout  [matsu, <spatial...>],  where <spatial...> is the
-    // input's dims with the tau axis removed (kept in the same order).
-    std::vector<TensorDim> out_dims;
-    out_dims.reserve(in.dims().size());
-    out_dims.push_back(TensorDim{ToExp::dim_label, M});       // Matsubara = fastest
-    for (size_t i = 1; i < in.dims().size(); ++i)
-      out_dims.push_back(in.dims()[i]);                        // unchanged spatial dims
-
-    const size_t S = in.total_elements() / T;                  // total number of spatial elements
-    TensorOut    out(out_dims);
-
-    // Contract:  out[m, sp] = sum_t K[m, t] * in[sp, t]
-    //   in : [tau,   spatial]  ->  in[t + T*sp]
-    //   out: [matsu, spatial]  ->  out[m + M*sp]
-    const InScalar* in_buf  = in.data();
-    DataType*       out_buf = out.data();
-
     if (save_) {
-      // The kernel is stored: contract against the K[m,t] matrix (K: [matsu,tau] -> K[m + M*t]).
-      const DataType* K_buf = kernel_.data();
-      for (size_t sp = 0; sp < S; ++sp)
-        for (size_t m = 0; m < M; ++m) {
-          DataType sum{};
-          for (size_t t = 0; t < T; ++t)
-            sum += K_buf[m + M * t] * in_buf[t + T * sp];
-          out_buf[m + M * sp] = sum;
-        }
-    } else {
-      // No stored kernel: compute each K[m,t] element-by-element on the fly, straight
-      // into the output. This uses no kernel memory, at the cost of recomputing K.
-      for (size_t sp = 0; sp < S; ++sp)
-        for (size_t m = 0; m < M; ++m) {
-          DataType sum{};
-          for (size_t t = 0; t < T; ++t)
-            sum += K(m, t) * in_buf[t + T * sp];
-          out_buf[m + M * sp] = sum;
-        }
+      // The kernel is stored: use the (mixed-type) gemm to form
+      //   out[m, sp] = sum_t kernel[m, t] * in[sp, t]
+      // with X = kernel [matsu, tau] (tau slowest) and Y = input [tau, spatial] (tau
+      // fastest); the free gemm allocates the output tensor for us.
+      TensorOut out;
+      gemm(kernel_, in, out, FromExp::dim_label, FromExp::dim_label);
+      return OutputType(std::move(out), matsu_grid_);
     }
 
+    // save == false: no stored kernel. Allocate the output and compute each K[m, t]
+    // element-by-element on the fly, straight into the output. This uses no kernel
+    // memory, at the cost of recomputing K.
+    std::vector<TensorDim> out_dims;
+    out_dims.reserve(in.dims().size());
+    out_dims.push_back(TensorDim{ToExp::dim_label, M});      // Matsubara = fastest
+    for (size_t i = 1; i < in.dims().size(); ++i)
+      out_dims.push_back(in.dims()[i]);                        // unchanged spatial dims
+    TensorOut out(out_dims);
+
+    const size_t    S       = in.total_elements() / T;        // total number of spatial elements
+    const InScalar* in_buf  = in.data();                       // in[sp, t]  -> in[t + T*sp]
+    DataType*       out_buf = out.data();                      // out[m, sp] -> out[m + M*sp]
+    for (size_t sp = 0; sp < S; ++sp)
+      for (size_t m = 0; m < M; ++m) {
+        DataType sum{};
+        for (size_t t = 0; t < T; ++t)
+          sum += K(m, t) * in_buf[t + T * sp];
+        out_buf[m + M * sp] = sum;
+      }
     return OutputType(std::move(out), matsu_grid_);
   }
 
