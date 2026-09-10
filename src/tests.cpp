@@ -270,6 +270,9 @@ int run_tests() {
     fourier_tau_to_matsu_check<Bosonic>  (/*save=*/false, beta, T, halfN, mu_n, nu_n);
   }
 
+  // ---- Story 03: analytic convergence tests for the Fourier transform ----
+  run_fourier_convergence_tests();
+
   return 0;
 }
 

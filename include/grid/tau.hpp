@@ -80,31 +80,86 @@ private:
   std::vector<double>         weights_;
   InverseTemperature          beta_;
 
-  // Gauss–Legendre nodes x and weights W on (-1,1), ascending order
-  // (Newton–Raphson, A&S 25.2.17 / Numerical Recipes `gaussl`)
+  // Gauss–Legendre nodes x and weights W on (-1,1), ascending order.
+  //
+  // Root-finding with a bracketing safeguard: the root x_i = cos(i·π/(n+1)) of
+  // P_n is strictly bracketed between the classic NR starting points, in the
+  // sense that, for i < m,
+  //     cos(π(2i+1)/(2n+2))  <  x_i  <  cos(π(2i−1)/(2n+2))
+  // and the smallest positive root x_m is bracketed by (0, cos(π(2m−1)/(2n+2))).
+  // (For odd n the middle root x_m = 0 exactly.)
+  //
+  // The naive A&S/Numerical-Recipes Newton (no bracket) is NOT robust here:
+  // for even n, P_n'(0) = 0, so near the middle roots the Newton step
+  // |P_n/P_n'| is huge, the iterate crosses the origin, and some i's converge
+  // to the WRONG root (observed: n=16, i=8 converging to −x_6 instead of x_8),
+  // silently corrupting both nodes and weights. We therefore keep Newton as
+  // long as the candidate stays inside the bracket and bisect otherwise;
+  // the root is always found and no root crossing is possible. (The
+  // starting points are never roots, and all roots of P_n are simple, so the
+  // sign-based bracket update is well defined.)
   static void legendre(size_t n, std::vector<double>& x, std::vector<double>& w) {
     x.resize(n);
     w.resize(n);
     const long m = static_cast<long>((n + 1) / 2);
     const double EPS = std::numeric_limits<double>::epsilon();
+    const double Pi  = std::numbers::pi;
+
+    // P_n(z) and P'_n(z) by the standard three-term recurrence (A&S 25.2.17).
+    // (Same P_n as before; kept as a helper so both are available.)
+    auto pn = [n](double z, double& f, double& df) {
+      double p1 = 1.0, p2 = 0.0;
+      for (long j = 1; j <= n; ++j) {
+        const double p3 = p2;
+        p2 = p1;
+        p1 = ((2.0 * j - 1.0) * z * p2 - (j - 1.0) * p3) / j;
+      }
+      df = static_cast<double>(n) * (z * p1 - p2) / (z * z - 1.0);
+      f  = p1;
+    };
+
     for (long i = 1; i <= m; ++i) {
-      double z  = std::cos(std::numbers::pi * (2.0 * i - 1.0) / (2.0 * n + 2.0));
-      double z1 = z;
-      double pp = 1.0;
-      do {
-        double p1 = 1.0, p2 = 0.0;
-        for (long j = 1; j <= static_cast<long>(n); ++j) {
-          double p3 = p2;
-          p2 = p1;
-          p1 = ((2.0 * j - 1.0) * z * p2 - (j - 1.0) * p3) / j;
+      double z;
+      if ((n % 2 == 1) && (i == m)) {
+        z = 0.0;                                  // exact middle root (odd n)
+      } else {
+        const double lo = ((i == m) ? 0.0
+                      : std::cos(Pi * (2.0 * i + 1.0) / (2.0 * n + 2.0)));
+        const double hi = std::cos(Pi * (2.0 * i - 1.0) / (2.0 * n + 2.0));
+
+        // Invariant: the unique root x_i lies in (a, b);  fa = P_n(a) ≠ 0.
+        double a  = lo, b = hi;
+        double ffa, dfa;
+        pn(a, ffa, dfa);
+        double fa = ffa;
+
+        double zt = 0.5 * (a + b);
+        for (int it = 0; it < 80 && (b - a) > 16.0 * EPS; ++it) {
+          double f, df;
+          pn(zt, f, df);
+          const double zn = (df == 0.0) ? 0.5 * (a + b) : zt - f / df;
+          // Shrink the bracket to the side that still contains the root.
+          if ((fa > 0.0 && f > 0.0) || (fa < 0.0 && f < 0.0)) { a = zt; fa = f; }
+          else                                                  { b = zt; }
+          // Newton step if it respects the bracket, otherwise bisect.
+          zt = (zn > a && zn < b) ? zn : 0.5 * (a + b);
         }
-        pp = static_cast<double>(n) * (z * p1 - p2) / (z * z - 1.0);
-        z1 = z;
-        z -= p1 / pp;
-      } while (std::fabs(z - z1) > 16.0 * EPS);
+        z = 0.5 * (a + b);
+        { // one final Newton polish (quadratic) plus refreshed P'_n(z)
+          double f, df;
+          pn(z, f, df);
+          if (df != 0.0) z -= f / df;
+          pn(z, f, df);
+        }
+      }
+
+      // Gauss weight:  W_i = 2 / ( (1 - x_i^2) * P'_n(x_i)^2 ).
+      double f_dummy, dfz;
+      pn(z, f_dummy, dfz);
+      const double wi = 2.0 / ((1.0 - z * z) * dfz * dfz);
+
       x[static_cast<size_t>(i - 1)] = -z;
       x[n - i]                      =  z;
-      const double wi = 2.0 / ((1.0 - z * z) * pp * pp);
       w[static_cast<size_t>(i - 1)] = wi;
       w[n - i]                      = wi;
     }
