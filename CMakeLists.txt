@@ -21,7 +21,8 @@ FetchContent_MakeAvailable(HighFive)
 
 
 add_executable(cppgw
-  src/main.cpp)
+  src/main.cpp
+  src/tests.cpp)
 
 target_link_libraries(cppgw
   PRIVATE
