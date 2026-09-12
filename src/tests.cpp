@@ -273,6 +273,9 @@ int run_tests() {
   // ---- Story 03: analytic convergence tests for the Fourier transform ----
   run_fourier_convergence_tests();
 
+  // ---- Story 04: inverse (Matsubara -> tau) Fourier transform ----
+  run_inverse_fourier_tests();
+
   return 0;
 }
 

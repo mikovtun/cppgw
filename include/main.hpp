@@ -18,4 +18,6 @@
 #include "grid/tau.hpp"
 #include "grid/matsubara.hpp"
 #include "grid/fourier.hpp"
+#include "grid/fourier_inverse.hpp"
+#include "tail.hpp"
 

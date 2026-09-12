@@ -23,7 +23,8 @@ FetchContent_MakeAvailable(HighFive)
 add_executable(cppgw
   src/main.cpp
   src/tests.cpp
-  src/fourier_tests.cpp)
+  src/fourier_tests.cpp
+  src/inverse_fourier_tests.cpp)
 
 target_link_libraries(cppgw
   PRIVATE

@@ -10,4 +10,9 @@ int run_tests();
 // Returns 0 on success; throws std::runtime_error on failure.
 int run_fourier_convergence_tests();
 
+// Story 04: inverse (Matsubara -> tau) Fourier transform, fermionic tail
+// subtraction, and tensor-valued behavior tests.
+// Returns 0 on success; throws std::runtime_error on failure.
+int run_inverse_fourier_tests();
+
 } // namespace cppgw

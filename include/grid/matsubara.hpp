@@ -64,6 +64,7 @@ public:
 
   const std::vector<point_type>& points() const { return points_; }
   size_t                           size()  const { return points_.size(); }
+  InverseTemperature               beta()  const { return beta_; }   // the beta of this Matsubara grid
 
   point_type operator()(size_t i) const {
     if (i >= points_.size())

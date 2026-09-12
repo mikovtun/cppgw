@@ -103,7 +103,12 @@ void ensure_repr_dim(Tensor<dt, Executor::Host>& t, const TensorDimLabel& repr_l
 // A data-owning Tensor-valued function sampled on a concrete ImaginaryTime grid G.
 //   data_( spatial_indices..., <grid> )   with <grid> the FASTEST axis (size == grid.size()),
 //   labelled G's GridDimLabel<ImaginaryTimeSpace> so it can be contracted as a gemm index.
-template <FloatingPoint data_type, ImaginaryTimeGrid G>
+//
+// S is the statistics tag (Fermionic/Bosonic), mirroring the existing S parameter on
+// GridExpansionMatsubara, so the two sides of a Fourier pair are statistics-matched and
+// the inverse transform can enforce the match (Objective 1 of Story 04). It defaults to
+// Fermionic so existing two-parameter uses (GridExpansionTau<double, G>) keep compiling.
+template <FloatingPoint data_type, ImaginaryTimeGrid G, StatisticsTag S = Fermionic>
 class GridExpansionTau {
 public:
   using space      = ImaginaryTimeSpace;
@@ -111,6 +116,7 @@ public:
   using DimLabel   = GridDimLabel<space>;
   using grid_type  = G;
   using scalar_type = data_type;
+  using statistics_type = S;     // Fermionic / Bosonic (StatisticsTag)
 
   // The tensor axis this representation owns; it must be exactly the grid's label.
   inline static constexpr DimLabel dim_label{};
@@ -160,6 +166,8 @@ public:
   using DimLabel   = GridDimLabel<space>;
   using grid_type  = MatsubaraGrid<S>;
   using scalar_type = data_type;
+
+  using statistics_type = S;     // Fermionic / Bosonic (StatisticsTag)
 
   inline static constexpr DimLabel dim_label{};
   static_assert( std::same_as<std::remove_cvref_t<decltype(grid_type::dim_label)>, DimLabel>,
