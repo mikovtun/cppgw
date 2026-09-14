@@ -10,7 +10,7 @@
 #include "expansion.hpp"
 #include "chebyshev/basis.hpp"
 #include "chebyshev/tensor.hpp"
-#include "linalgbackend.hpp"
+#include "backend.hpp"
 #include "tensor_buffer.hpp"
 #include "tensor.hpp"
 #include "transform.hpp"

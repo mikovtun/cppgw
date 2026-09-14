@@ -2,7 +2,7 @@
 #include "expansion.hpp"        // GridExpansionTau, GridExpansionMatsubara (+ scalar_type / grid_type / statistics_type aliases)
 #include "grid.hpp"             // Quadrature, Grid, ...
 #include "types.hpp"
-#include "linalgbackend.hpp"    // gemm (Executor)
+#include "backend.hpp"    // gemm (Executor)
 
 #include <cmath>
 #include <stdexcept>

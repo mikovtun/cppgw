@@ -1,5 +1,6 @@
 #pragma once
 #include "types.hpp"
+#include "symmetry.hpp"
 #include <concepts>
 #include <ostream>
 #include <string>
@@ -75,9 +76,13 @@ inline std::ostream& operator<<(std::ostream& os, const TensorDimLabel& l) {
 struct TensorDim {
   TensorDimLabel label;
   size_t      dim = 0;
-  TensorDim(TensorDimLabel l_, size_t d_) : label(std::move(l_)), dim(d_) {};
+  SymGroup    symmetry = nullptr;   // Story 06: null => plain axis (the old, common case);
+                                     //            non-null => member of this symmetry family.
+  TensorDim(TensorDimLabel l_, size_t d_, SymGroup s_ = nullptr)
+      : label(std::move(l_)), dim(d_), symmetry(std::move(s_)) {}
   bool operator==(const TensorDim& other) const {
-    return label == other.label && dim == other.dim;
+    // Now also compares the SymGroup handle ("same group" == same object).
+    return label == other.label && dim == other.dim && symmetry == other.symmetry;
   }
 };
 

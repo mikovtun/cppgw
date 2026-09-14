@@ -11,7 +11,7 @@ namespace cppgw {
 
 // TensorBuffer<T, E> is the storage primitive: it owns 'count' elements of type T living on Executor E.
 // Pointer management, lifetime, resizes, and copies are handled by this class
-// All math lives in LinAlgBackend, not here
+// All math lives in TensorBackend, not here
 
 // Forward declare generic
 template <typename T, typename Executor>

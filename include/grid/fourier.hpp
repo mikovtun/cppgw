@@ -2,7 +2,7 @@
 #include "expansion.hpp"        // GridExpansionTau, GridExpansionMatsubara (+ scalar_type / grid_type aliases)
 #include "grid.hpp"             // Quadrature, Grid, ...
 #include "types.hpp"
-#include "linalgbackend.hpp"    // Executor
+#include "backend.hpp"    // Executor
 
 #include <cmath>
 #include <stdexcept>
@@ -66,7 +66,7 @@ namespace detail {
 //    type so the result can be adopted into ToExp.
 //
 //  The two modes use different machinery:
-//    save == true  -> gemm(...) (the mixed-type Tensor/LinAlgBackend matrix product)
+//    save == true  -> gemm(...) (the mixed-type Tensor/TensorBackend matrix product)
 //                     contracts the stored, complex kernel against the (possibly real)
 //                     input; the arithmetic is done in the output (complex) type.
 //    save == false -> no kernel is available (it is never stored), so each K[m,t] is

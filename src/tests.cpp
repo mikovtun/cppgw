@@ -276,6 +276,422 @@ int run_tests() {
   // ---- Story 04: inverse (Matsubara -> tau) Fourier transform ----
   run_inverse_fourier_tests();
 
+  // ---- Story 06: index symmetry, TensorBackend seam, no-op transpose ---
+  run_tensor_symmetry_tests();
+
+  return 0;
+}
+
+using cplx = std::complex<double>;
+
+namespace {
+// Exception-checking helper (logic_error specifically, for the transpose
+// not-yet-implemented contract).
+template <typename F>
+bool throws_le(F&& f, const char* expected_substring = "") {
+  try { f(); }
+  catch (const std::logic_error& e) {
+    if (expected_substring == nullptr)
+      return true;
+    return std::string(e.what()).find(expected_substring) != std::string::npos;
+  }
+  catch (...) { /* a throw, but of the wrong type */ }
+  return false;
+}
+
+// Exact (or tightly bounded) elementwise comparison of two Tensors: same rank,
+// same total size, and all linear elements equal within tol.
+template <typename T>
+bool tensor_allclose(const Tensor<T, Executor::Host>& a, const Tensor<T, Executor::Host>& b) {
+  if (a.rank() != b.rank() || a.total_elements() != b.total_elements())
+    return false;
+  for (size_t n = 0; n < a.total_elements(); ++n)
+    if (std::abs(a.linear(n) - b.linear(n)) > 1e-12)
+      return false;
+  return true;
+}
+} // namespace
+
+// ============================================================================
+//  Story 06 — tensor index symmetry, the TensorBackend seam, and the no-op
+//  transpose contract.
+// ============================================================================
+int run_tensor_symmetry_tests() {
+
+  // ------------------------------------------------------------------
+  //  0. The TensorBackend contract is satisfied for host scalars: the
+  //     seam's required ops (fill/zero/scale/conjugate + mixed-type gemm)
+  //     are statically present. The frontend programs ONLY against this.
+  // ------------------------------------------------------------------
+  static_assert(TensorBackendOps<double, Executor::Host>);
+  static_assert(TensorBackendOps<std::complex<double>, Executor::Host>);
+
+  // ------------------------------------------------------------------
+  //  1. Construction & invariants
+  // ------------------------------------------------------------------
+  {
+    using T2 = Tensor<double, Executor::Host>;
+    // (a) Plain/legacy path: TensorDim{label,dim} (null symmetry) still
+    //     constructs, and unique plain labels still hold.
+    T2 t({TensorDim{"a", 2}, TensorDim{"b", 3}});
+    if (!(t.rank() == 2 && null_symgroup(t.dims()[0].symmetry)
+          && null_symgroup(t.dims()[1].symmetry)))
+      throw std::runtime_error("symmetry tests: plain TensorDim lost its plain status");
+
+    // (b) Two plain "ao" axes (no group) -> a label spanning groups is an error.
+    if (!throws_ia([&]{ Tensor<double, Executor::Host>({{"ao", 50}, {"ao", 50}}); }))
+      throw std::runtime_error("symmetry tests: duplicate plain label must throw");
+    // Same label, TWO different groups -> error.
+    {
+      auto g1 = Symmetric();
+      auto g2 = Symmetric();                        // distinct group, same kind
+      if (!throws_ia([&]{ Tensor<double, Executor::Host>({TensorDim{"ao", 50, g1}, TensorDim{"ao", 50, g2}}); }))
+        throw std::runtime_error("symmetry tests: label spanning two groups must throw");
+      // One plain + one bound, same label -> error.
+      if (!throws_ia([&]{ Tensor<double, Executor::Host>({TensorDim{"ao", 50}, TensorDim{"ao", 50, g1}}); }))
+        throw std::runtime_error("symmetry tests: plain + bound duplicate label must throw");
+    }
+    // SymGroup members with mismatched sizes -> error.
+    {
+      auto g = Symmetric();
+      if (!throws_ia([&]{ Tensor<double, Executor::Host>({TensorDim{"ao", 50, g}, TensorDim{"ao", 40, g}}); }))
+        throw std::runtime_error("symmetry tests: matched-size rule violated without a throw");
+      // Mismatched LABEL inside one group -> error.
+      if (!throws_ia([&]{ Tensor<double, Executor::Host>({TensorDim{"ao", 50, g}, TensorDim{"oo", 50, g}}); }))
+        throw std::runtime_error("symmetry tests: matched-label rule violated without a throw");
+    }
+
+    // (c) eri3: duplicate label WITH one shared SymGroup -> constructs, rank 3,
+    //     the two ao axes carry the SAME handle.
+    auto g3 = Symmetric();
+    Tensor<double, Executor::Host> eri3(
+        { {TensorDimLabel("ri"), 120 },
+          { TensorDimLabel("ao"), 50, g3 },
+          { TensorDimLabel("ao"), 50, g3 } });
+    if (eri3.rank() != 3
+        || !same_symgroup(eri3.dims()[1].symmetry, eri3.dims()[2].symmetry)
+        || !same_symgroup(g3, eri3.dims()[1].symmetry))
+      throw std::runtime_error("symmetry tests: eri3 twin handles are not identical");
+
+    // (d) eri4: two INDEPENDENT symmetric pairs (g1, g2 distinct, same kind).
+    auto g1 = Symmetric();
+    auto g2 = Symmetric();
+    Tensor<cplx, Executor::Host> eri4(
+        { {TensorDimLabel("ao1"), 50, g1}, { TensorDimLabel("ao1"), 50, g1 },
+          { TensorDimLabel("ao2"), 50, g2}, { TensorDimLabel("ao2"), 50, g2 } });
+    if (same_symgroup(g1, g2))
+      throw std::runtime_error("symmetry tests: distinct SymmetryGroup instances compared equal");
+    if (g1->kind() != SymKind::Symmetric || g2->kind() != SymKind::Symmetric)
+      throw std::runtime_error("symmetry tests: Symmetric() factory mislabeled");
+    if (eri4.label_indices("ao1").size() != 2 || eri4.label_indices("ao2").size() != 2)
+      throw std::runtime_error("symmetry tests: eri4 family cardinality wrong");
+
+    // (e) Handle identity: a shared_ptr COPY of the same handle is the same
+    //     group; distinct factories are not. Same-group copies bind the label.
+    {
+      auto h1 = Hermitian();
+      auto h1copy = h1;                    // shared_ptr copy: same object
+      if (!same_symgroup(h1, h1copy) || !null_symgroup(nullptr))
+        throw std::runtime_error("symmetry tests: handle-identity copy rule broken");
+      auto h2 = Hermitian();               // fresh factory: distinct group
+      if (same_symgroup(h1, h2))
+        throw std::runtime_error("symmetry tests: two Hermitian() factories are the same group");
+      // And a copy can be used to construct a valid bound tensor.
+      Tensor<double, Executor::Host> hc({TensorDim{"ao", 50, h1}, TensorDim{"ao", 50, h1copy}});
+      (void)hc;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  //  2. Symmetry queries: label indices and no-op transpose contracts
+  // ------------------------------------------------------------------
+  {
+    // eri3-style duplicate label: label_indices / label_index / has_label.
+    auto g = Symmetric();
+    Tensor<double, Executor::Host> eri3(
+        { {TensorDimLabel("ri"), 3 },
+          { TensorDimLabel("ao"), 4, g }, { TensorDimLabel("ao"), 4, g } });
+    {
+      auto idx = eri3.label_indices(TensorDimLabel("ao"));
+      if (idx.size() != 2 || idx[0] != 1 || idx[1] != 2)
+        throw std::runtime_error("symmetry tests: label_indices('ao') != {1,2}");
+      if (eri3.label_index(TensorDimLabel("ao")) != 1)
+        throw std::runtime_error("symmetry tests: label_index('ao') != first position");
+      if (!eri3.has_label(TensorDimLabel("ao")))
+        throw std::runtime_error("symmetry tests: has_label('ao') is false");
+      if (eri3.has_label(TensorDimLabel("nope")))
+        throw std::runtime_error("symmetry tests: has_label('nope') is true");
+    }
+
+    // Symmetric (real) pair: transpose(1,2) is elementwise-identical, a copy
+    // (not a permutation), produced via the identity path (no restride).
+    {
+      using T2 = Tensor<double, Executor::Host>;
+      for (size_t k = 0; k < 4; ++k)
+        for (size_t j = 0; j < 4; ++j)
+          for (size_t i = 0; i < 3; ++i)
+            eri3(i, j, k) = 1.0 + i + 10*j + 100*k;
+      auto r12 = eri3.transpose(1, 2);
+      auto r21 = eri3.transpose(2, 1);
+      if (!tensor_allclose(eri3, r12) || !tensor_allclose(eri3, r21))
+        throw std::runtime_error("symmetry tests: symmetric transpose != identity");
+      // Symmetric in its arguments, and NOT aliasing the source:
+      if (eri3.data() == r12.data())
+        throw std::runtime_error("symmetry tests: transpose returned aliased storage");
+      if (r12(0,0,0) != eri3(0,0,0) || r21(2,3,1) != eri3(2,3,1))
+        throw std::runtime_error("symmetry tests: symmetric transpose value mismatch");
+      r12(1, 1, 1) = -999.0;
+      if (eri3(1, 1, 1) == -999.0)
+        throw std::runtime_error("symmetry tests: transpose aliasing corrupted the source");
+      // ri<->ao (0,1) is NOT a bound pair (ri is plain) -> logic_error.
+      if (!throws_le([&]{ eri3.transpose(0, 1); }))
+        throw std::runtime_error("symmetry tests: transpose(0,1) failed to throw");
+      // Out-of-range position -> logic_error.
+      if (!throws_le([&]{ eri3.transpose(1, 9); }))
+        throw std::runtime_error("symmetry tests: transpose oob did not throw");
+    }
+
+    // mo_coeff {ao, mo}: no bound pair -> ANY transpose is not-yet-implemented.
+    {
+      Tensor<double, Executor::Host> mo({TensorDim{"ao", 3}, TensorDim{"mo", 2}});
+      if (mo.label_indices("ao").size() != 1 || mo.label_indices("mo").size() != 1)
+        throw std::runtime_error("symmetry tests: mo_coeff label indices wrong");
+      if (!throws_le([&]{ mo.transpose(0, 1); }))
+        throw std::runtime_error("symmetry tests: mo_coeff transpose must throw");
+    }
+
+    // Antisymmetric pair (real): transpose(i,j) == -T elementwise.
+    {
+      using T2 = Tensor<double, Executor::Host>;
+      auto a = Antisymmetric();
+      T2 at({TensorDim{"x", 2, a}, TensorDim{"x", 2, a}});
+      for (int i = 0; i < 4; ++i)  at.data()[i] = 1.0 + i;
+      auto r = at.transpose(0, 1);
+      // Direct check: all elements of r == -all elements of at (the sign flip).
+      for (size_t n = 0; n < at.total_elements(); ++n)
+        if (r.linear(n) != -at.linear(n))
+          throw std::runtime_error("symmetry tests: antisymmetric transpose != -T");
+      auto r2 = at.transpose(1, 0);
+      for (size_t n = 0; n < at.total_elements(); ++n)
+        if (r2.linear(n) != -at.linear(n))
+          throw std::runtime_error("symmetry tests: antisymmetric transpose(1,0) != -T");
+    }
+
+    // Complex Hermitian pair: transpose(i,j) == conj(T) elementwise.
+    {
+      using T2 = Tensor<cplx, Executor::Host>;
+      auto h = Hermitian();
+      T2 ht({TensorDim{"ao", 3, h}, TensorDim{"ao", 3, h}});
+      for (size_t n = 0; n < 9; ++n)
+        ht.linear(n) = cplx(1.0*n, -2.0*n + 0.5);       // nonzero imag part
+      auto r = ht.transpose(0, 1);
+      if (r.total_elements() != 9)
+        throw std::runtime_error("symmetry tests: hermitian transpose size wrong");
+      for (size_t n = 0; n < 9; ++n) {
+        if (r.linear(n) != std::conj(ht.linear(n)))
+          throw std::runtime_error("symmetry tests: complex hermitian transpose != conj(T)");
+      }
+      auto r2 = ht.transpose(1, 0);
+      // Symmetric in its arguments: transpose(1,0) equals transpose(0,1).
+      for (size_t n = 0; n < 9; ++n)
+        if (std::abs(r2.linear(n) - r.linear(n)) > 1e-15)
+          throw std::runtime_error("symmetry tests: hermitian transpose not symmetric in args");
+    }
+
+    // Hermitian on a REAL scalar reduces to Symmetric: transpose == T.
+    {
+      using T2 = Tensor<double, Executor::Host>;
+      auto h = Hermitian();
+      T2 hcore({TensorDim{"ao", 4, h}, TensorDim{"ao", 4, h}});
+      for (size_t n = 0; n < 16; ++n) hcore.linear(n) = 3.0*n - 1.0;
+      auto r = hcore.transpose(0, 1);
+      if (!tensor_allclose(hcore, r))
+        throw std::runtime_error("symmetry tests: real hermitian transpose != T");
+    }
+  }
+
+  // ------------------------------------------------------------------
+  //  3. gemm on symmetric tensors (per-position bookkeeping of duplicate labels)
+  // ------------------------------------------------------------------
+  {
+    // X (eri3-style):  {ri=2, ao=3, ao=3} with the two ao axes one Symmetric family.
+    //                  X(i, j, k) = 1 + i + 10*j + 100*k
+    // Y:               {ao=3, x=2};                Y(k, x) = 3 + 5*k + 7*x
+    // C = X x_{ao}:    {ri=2, ao=3, x=2}
+    //   C(i, j, x)   = Σ_k  X(i, j, k) * Y(k, x)
+    {
+      auto g = Symmetric();
+      Tensor<double, Executor::Host> X(
+          { TensorDim{"ri", 2}, TensorDim{"ao", 3, g}, TensorDim{"ao", 3, g } });
+      for (size_t k = 0; k < 3; ++k)
+        for (size_t j = 0; j < 3; ++j)
+          for (size_t i = 0; i < 2; ++i)
+            X(i, j, k) = 1.0 + i + 10.0*j + 100.0*k;
+
+      Tensor<double, Executor::Host> Y({TensorDim{"ao", 3}, TensorDim{"x", 2}});
+      for (size_t x = 0; x < 2; ++x)
+        for (size_t k = 0; k < 3; ++k)
+          Y(k, x) = 3.0 + 5.0*k + 7.0*x;
+
+      Tensor<double, Executor::Host> C;                      // gemm shapes + allocates
+      gemm(X, Y, C, "ao", "ao");
+
+      // Output shape: X minus its last dim, then Y minus its first dim
+      //   = {ri=2, ao=3, x=2};  surviving ao keeps its position (index 1) AND
+      //   keeps its original SymGroup (per-position bookkeeping).
+      if (C.rank() != 3)
+        throw std::runtime_error("symmetry tests: gemm(X,Y) wrong rank");
+      if (!(C.dims()[0].label == TensorDimLabel("ri") && C.dims()[0].dim == 2
+            && C.dims()[1].label == TensorDimLabel("ao") && C.dims()[1].dim == 3
+            && C.dims()[2].label == TensorDimLabel("x") && C.dims()[2].dim == 2))
+        throw std::runtime_error("symmetry tests: gemm(X,Y) wrong output labels/sizes");
+      if (!same_symgroup(C.dims()[1].symmetry, g))
+        throw std::runtime_error("symmetry tests: gemm lost the surviving twin's SymGroup");
+
+      double maxerr = 0.0;
+      for (size_t x = 0; x < 2; ++x)
+        for (size_t j = 0; j < 3; ++j)
+          for (size_t i = 0; i < 2; ++i) {
+            double ref = 0.0;
+            for (size_t k = 0; k < 3; ++k)
+              ref += (1.0 + i + 10.0*j + 100.0*k) * (3.0 + 5.0*k + 7.0*x);
+            maxerr = std::max(maxerr, std::abs(C(i, j, x) - ref));
+          }
+      if (maxerr > 1e-12)
+        throw std::runtime_error("symmetry tests: gemm on symmetric tensor numerically wrong (maxerr "
+            + std::to_string(maxerr) + ")");
+
+      // Wrong gemm order / nonexistent label still throw on symmetric tensors.
+      if (!throws_ia([&]{ gemm(Y, X, C, "ao", "ao"); }))      // "ao" is not Y's last dim
+        throw std::runtime_error("symmetry tests: gemm(Y,X) should throw (label not last)");
+      if (!throws_ia([&]{ gemm(X, Y, C, "zz", "ao"); }))      // label not on X's last dim
+        throw std::runtime_error("symmetry tests: gemm(X,Y,'zz','ao') should throw");
+    }
+
+    // Regression: the original hand-written mixed-type gemm values must land in
+    // the SAME place through the new seam (Story 2 test, re-asserted here)
+    //   C[0][0]=22+22i C[0][1]=28+28i  C[1][0]=49+49i C[1][1]=64+64i
+    {
+      Tensor<double, Executor::Host>    A({{"a", 2}, {"k", 3}});
+      Tensor<cplx,  Executor::Host>    B({{"k", 3}, {"b", 2}});
+      for (size_t k = 0; k < 3; ++k)
+        for (size_t i = 0; i < 2; ++i)
+          A(i, k) = 3.0*i + k + 1.0;
+      for (size_t j = 0; j < 2; ++j)
+        for (size_t k = 0; k < 3; ++k) {
+          const double v = 2.0*k + j + 1.0;
+          B.linear(k + j*3) = cplx(v, v);
+        }
+      Tensor<cplx, Executor::Host> C;
+      gemm(A, B, C, "k", "k");
+      const cplx Cexp[2][2] = {{ cplx(22,22), cplx(28,28) }, { cplx(49,49), cplx(64,64) }};
+      for (size_t j = 0; j < 2; ++j)
+        for (size_t i = 0; i < 2; ++i)
+          if (std::abs(C(i, j) - Cexp[i][j]) > 1e-12)
+            throw std::runtime_error("symmetry tests: regression gemm value mismatch");
+    }
+  }
+
+  // ------------------------------------------------------------------
+  //  4. TensorBackend seam: host unary ops (fill/zero/scale/conjugate) + gemm
+  // ------------------------------------------------------------------
+  {
+    // Real scalar type.
+    {
+      using B = TensorBackend<double, Executor::Host>;
+      TensorBuffer<double, Executor::Host> buf(3);
+      B::fill(buf, 2.0);
+      for (int i = 0; i < 3; ++i) if (buf.data()[i] != 2.0)
+        throw std::runtime_error("symmetry tests: backend fill (real) wrong");
+      B::zero(buf);
+      for (int i = 0; i < 3; ++i) if (buf.data()[i] != 0.0)
+        throw std::runtime_error("symmetry tests: backend zero (real) wrong");
+      B::fill(buf, 3.0);
+      B::scale(buf, -2.0);
+      for (int i = 0; i < 3; ++i) if (buf.data()[i] != -6.0)
+        throw std::runtime_error("symmetry tests: backend scale (real) wrong");
+      B::conjugate(buf);                                    // no-op on real
+      for (int i = 0; i < 3; ++i) if (buf.data()[i] != -6.0)
+        throw std::runtime_error("symmetry tests: backend conjugate (real) not a no-op");
+    }
+    // Complex scalar type.
+    {
+      using B = TensorBackend<cplx, Executor::Host>;
+      TensorBuffer<cplx, Executor::Host> buf(2);
+      B::fill(buf, cplx(1.0, -2.0));
+      B::conjugate(buf);
+      if (buf.data()[0] != cplx(1.0, 2.0) || buf.data()[1] != cplx(1.0, 2.0))
+        throw std::runtime_error("symmetry tests: backend conjugate (complex) wrong");
+      B::scale(buf, cplx(0.0, 1.0));                         // multiply by i
+      if (buf.data()[0] != cplx(-2.0, 1.0))
+        throw std::runtime_error("symmetry tests: backend scale (complex) wrong");
+      B::zero(buf);
+      if (buf.data()[0] != cplx(0.0, 0.0))
+        throw std::runtime_error("symmetry tests: backend zero (complex) wrong");
+    }
+    // Host gemm matches the hand-written reference exactly (new home, same values).
+    {
+      using B = TensorBackend<double, Executor::Host>;
+      const size_t M = 2, Kp = 3, N = 2;
+      TensorBuffer<double, Executor::Host> A(M * Kp), Bbuf(Kp * N), C(M * N);
+      // A(i,k) = i + 2k + 1       B(k,j) = 3k + j
+      for (size_t k = 0; k < Kp; ++k)
+        for (size_t i = 0; i < M; ++i)
+          A.data()[i + k * M] = 1.0 + i + 2.0*k;
+      for (size_t j = 0; j < N; ++j)
+        for (size_t k = 0; k < Kp; ++k)
+          Bbuf.data()[k + j * Kp] = 3.0*k + j;
+      B::gemm(A, M, Kp, Bbuf, N, C);
+      for (size_t j = 0; j < N; ++j)
+        for (size_t i = 0; i < M; ++i) {
+          double ref = 0.0;
+          for (size_t k = 0; k < Kp; ++k)
+            ref += (1.0 + i + 2.0*k) * (3.0*k + j);
+          if (std::abs(C.data()[i + j * M] - ref) > 1e-12)
+            throw std::runtime_error("symmetry tests: backend gemm value mismatch");
+        }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  //  5. GF2 linkage (Stories 05/07): the physics-level construction with the
+  //     new API:  hcore{ao,ao}=Hermitian, mo_coeff{ao,mo}=plain,
+  //     eri3{ri,ao,ao}=Symmetric. No numerics — shape/label/symmetry only.
+  // ------------------------------------------------------------------
+  {
+    using T2 = Tensor<double, Executor::Host>;
+    auto hcore_g    = Hermitian();
+    auto eri3_g     = Symmetric();
+    T2 hcore   ({TensorDim{"ao", 30, hcore_g}, TensorDim{"ao", 30, hcore_g}});
+    T2 mo_coeff({TensorDim{"ao", 30},              TensorDim{"mo", 12}});
+    T2 eri3    ({TensorDim{"ri", 120}, TensorDim{"ao", 30, eri3_g}, TensorDim{"ao", 30, eri3_g}});
+
+    std::cout << "\n--- Story 06: GF2 inputs (new symmetry API) ---" << std::endl;
+    // These tensors are constructed for their shape/label/symmetry, not their
+    // numerics (Story 07 reads in the data). Print metadata only - the full data
+    // block is all-zero and just noise.
+    hcore   .print(std::cout, /*with_data=*/false);
+    mo_coeff.print(std::cout, /*with_data=*/false);
+    eri3    .print(std::cout, /*with_data=*/false);
+
+    if (hcore.rank() != 2 || hcore.dims()[0].dim != 30 || hcore.dims()[1].dim != 30
+        || !same_symgroup(hcore.dims()[0].symmetry, hcore.dims()[1].symmetry)
+        || hcore.dims()[0].symmetry->kind() != SymKind::Hermitian)
+      throw std::runtime_error("symmetry tests: GF2 hcore shape/symmetry wrong");
+    if (hcore.transpose(0, 1).rank() != 2)                  // real hermitian: no-op
+      throw std::runtime_error("symmetry tests: GF2 hcore transpose failed");
+
+    if (mo_coeff.rank() != 2 || !null_symgroup(mo_coeff.dims()[0].symmetry)
+        || !null_symgroup(mo_coeff.dims()[1].symmetry))
+      throw std::runtime_error("symmetry tests: GF2 mo_coeff shape/symmetry wrong");
+    if (!throws_le([&]{ mo_coeff.transpose(0, 1); }))
+      throw std::runtime_error("symmetry tests: GF2 mo_coeff transpose must throw");
+
+    if (eri3.rank() != 3 || eri3.label_indices("ao").size() != 2
+        || eri3.dims()[1].symmetry->kind() != SymKind::Symmetric)
+      throw std::runtime_error("symmetry tests: GF2 eri3 shape/symmetry wrong");
+  }
+
   return 0;
 }
 
