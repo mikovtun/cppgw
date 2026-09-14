@@ -1,5 +1,14 @@
 # Story 05 — Input parsing & data loading (GF2)
 
+> **Dependencies:** Story 05 **depends on Story 06** (*Tensor index symmetry & the Tensor backend seam*).
+> Story 06 introduces `include/symmetry.hpp` (`SymKind`, `SymmetryGroup`, `SymGroup`, the `Symmetric()`/
+> `Hermitian()`/`Antisymmetric()` factories), relaxes the `TensorDim` label invariant so a *pair* of
+> identical axes may share one label when bound by a shared `SymmetryGroup`, and defines the
+> `TensorBackend` op contract. This story uses that API to **declare the physical symmetries of the
+> loaded tensors** (see *Data loading (GF2) & dimension labels* below: `hcore` → Hermitian, `eri3` → symmetric
+> on its two AO axes, `mo_coeff` → no symmetries). Story 06 must land first; the label/symmetry validation
+> in `Tensor` construction is what makes the shared-`ao` axes below constructible.
+
 This software needs to read in data provided by other programs in the form of an HDF5 file.
 For the calculations this program is supposed to do (GF2 and GW), there are 3 key tensors needed:
 
@@ -57,19 +66,24 @@ should be a valid input file (with a `CALCULATION` line added, see below).
   per-calculation requirement are defined in **one place**, so adding a new parameter (or changing a default)
   is a single, local edit rather than a hunt across the codebase.
 - **Tensor dimensions are labelled by physical meaning** (the point of the Tensor labelling system).
-  See the Dimension labels section. (No transpose capability yet — that is a future story; algorithms will
-  later swap indices as needed.)
-- **`mu` / `nu` are the two distinct AO labels.** `Tensor` requires *unique* dimension labels, so the two
-  AO axes of `hcore` and `eri3` are labelled `mu` and `nu` (not both `ao`). `mo` is the MO axis, `ri` the RI axis.
+  See the Dimension labels section. (The *active* transpose for non-identical axes is a future story;
+  Story 06 already provides the no-op symmetry transpose `T.transpose(i,j)` for symmetry-bound pairs.)
+- **Both AO axes of `hcore`/`eri3` share the label `ao`, bound by ONE shared `SymmetryGroup`** (Story 06
+  label rule 2: a repeated label is legal iff every occurrence is bound to the same non-null group). The
+  interchangeable axes are physically identical, so one label names the family; `label_index("ao")` is a
+  valid representative. `mo` is the MO axis, `ri` the RI axis (both plain, single occurrences).
 - **`CALCULATION` is required to be present.** The program must know which calculation to run, so an input
   file with no `CALCULATION` line is a hard error (not defaulted to GF2).
 - **Duplicate keywords are a hard error** (the same keyword on two lines is ambiguous), *not* last-wins.
 - **Comments:** both `#` and `//` at the start of a line (first non-whitespace char) start a whole-line comment.
-- **Physical symmetries are NOT used or relied upon here** (out of scope): `hcore` (AO × AO) is Hermitian, and
-  the `eri3` DF/RI tensor carries the usual 2-electron / RI index symmetries (the two AO axes are interchangeable).
-  This story treats every loaded tensor as an opaque, generic `Tensor<double, Executor::Host>` and stores the raw
-  data exactly as it appears in the file. No storage compression, symmetry-exploiting contractions, or
-  consistency checks (e.g. checking `hcore == hcore^†`) are performed; those belong to the GF2 numerics story.
+- **Physical symmetries are DECLARED on the loaded tensors** (using Story 06's API; see *Data loading (GF2)
+  & dimension labels*):
+  `hcore`'s two AO axes are bound by a shared `Hermitian()` group, `eri3`'s two AO axes by a shared
+  `Symmetric()` group, `mo_coeff` carries no symmetries. Symmetry is **advisory** (Story 06, decision Q3):
+  it is metadata on the `Tensor` that names the physics and lets no-op work be skipped. The data is still
+  stored raw and dense exactly as it appears in the file — no storage compression, no symmetry-exploiting
+  contractions, and **no consistency checks** (e.g. checking `hcore == hcore^†`) are performed at load
+  time; those belong to the GF2 numerics story.
 
 ## Context for implementation
 
@@ -99,11 +113,15 @@ should be a valid input file (with a `CALCULATION` line added, see below).
    - selects the three required datasets (`ERI3`, `HCORE`, `MO_COEFF`) from the parsed input,
    - verifies each names an existing, readable `float64` scalar dataset in the HDF5 file,
    - loads each into a `Tensor<double, Executor::Host>` with physically meaningful dimension labels, and
+   - **declares the physical index symmetries** on the loaded tensors via Story 06's `SymmetryGroup` API
+     (`include/symmetry.hpp`): `hcore` → its two `ao` axes bound by a shared `Hermitian()` group;
+     `eri3` → its two `ao` axes bound by a shared `Symmetric()` group; `mo_coeff` → plain (no symmetries), and
    - records `eta` (default `1e-5`) alongside the tensors.
    - No actual GF2 numerics in this story — only ingestion + wiring.
 
 Out of scope: any GF2/GW numerics, transposing/permuted reads (labels only), reading tensors other than the
-three above, and any device-side loading.
+three above, and any device-side loading. (Symmetry *data-validity* checks — “is the loaded `hcore` actually
+Hermitian?” — are out of scope; symmetry here is advisory metadata only, per Story 06 decision Q3.)
 
 ---
 
@@ -228,35 +246,59 @@ Parse rules:
 `include/gf2.hpp` (new):
 
 ```cpp
+// include/gf2.hpp  (new). Includes "symmetry.hpp" (Story 06).
 struct Gf2Input {
-  Tensor<double, Executor::Host> hcore;     // AO × AO          (24 × 24)
-  Tensor<double, Executor::Host> mo_coeff;  // AO × MO          (24 × 24)
-  Tensor<double, Executor::Host> eri3;      // RI × AO × AO     (116 × 24 × 24)
+  Tensor<double, Executor::Host> hcore;     // AO × AO          (24 × 24)  — `ao`,`ao` bound by a shared Hermitian() SymGroup
+  Tensor<double, Executor::Host> mo_coeff;  // AO × MO          (24 × 24)  — plain `ao`,`mo`, no SymGroup
+  Tensor<double, Executor::Host> eri3;      // RI × AO × AO     (116 × 24 × 24) — `ao`,`ao` bound by a shared Symmetric() SymGroup, plain `ri`
   double eta = 1e-5;                        // from input (defaulted)
 };
 
-// Loads the three tensors named by `pin` out of the HDF5 file at `h5path`.
+// Loads the three tensors named by `pin` out of the HDF5 file at `h5path`,
+// constructing each Tensor with its physical labels AND its declared symmetries
+// (see the Dimension labels section). The data is stored exactly as written in the file:
+// symmetries are advisory metadata (Story 06), never used to alter storage.
 // Throws std::invalid_argument / std::runtime_error on a missing dataset, a non-float64 dataset,
 // or a dimension mismatch.
 Gf2Input load_gf2(const ParsedInput& pin, const std::string& h5path);
 ```
 
-**Dimension labels** (physical meaning; `Tensor` requires *unique* labels, so the two AO axes are distinct):
+**Dimension labels** (physical meaning; by Story 06 label rule 2 the interchangeable pair may — must —
+share one label bound by a shared `SymmetryGroup`):
 
-| tensor     | H5 shape (slow→fast) | `Tensor` dims (fast→slow) | labels |
-|------------|----------------------|---------------------------|--------|
-| `hcore`    | `(ao, ao)` 24×24     | `{ nu=24, mu=24 }`        | `mu`, `nu` (both AO) |
-| `mo_coeff` | `(ao, mo)` 24×24     | `{ mo=24, mu=24 }`        | `mu` (AO), `mo` (MO) |
-| `eri3`     | `(ri, ao, ao)` 116×24×24 | `{ nu=24, mu=24, ri=116 }`| `mu`,`nu` (AO), `ri` (RI/DF) |
+| tensor     | H5 shape (slow→fast) | `Tensor` dims (fast→slow) | labels / symmetries |
+|------------|----------------------|---------------------------|---------------------|
+| `hcore`    | `(ao, ao)` 24×24     | `{ ao=24, ao=24 }`        | `ao`,`ao` — same label, bound by ONE shared `Hermitian()` SymGroup |
+| `mo_coeff` | `(ao, mo)` 24×24     | `{ mo=24, ao=24 }`        | `ao` (plain), `mo` (plain) — no SymGroup |
+| `eri3`     | `(ri, ao, ao)` 116×24×24 | `{ ao=24, ao=24, ri=116 }` | `ao`,`ao` — same label, bound by ONE shared `Symmetric()` SymGroup; `ri` (plain) |
+
+Construction (Story 06 API; each factory call is a FRESH group, so each tensor's pair is its own family):
+
+```cpp
+auto hcore_g = Hermitian();   // one shared group object for hcore's AO pair
+auto eri3_g  = Symmetric();   // one shared group object for eri3's AO pair
+
+Tensor<double, Executor::Host> hcore   ( { TensorDim{"ao", N_AO, hcore_g}, TensorDim{"ao", N_AO, hcore_g} });
+Tensor<double, Executor::Host> mo_coeff( { TensorDim{"ao", N_AO},          TensorDim{"mo", N_MO} });
+Tensor<double, Executor::Host> eri3    ( { TensorDim{"ao", N_AO, eri3_g},  TensorDim{"ao", N_AO, eri3_g}, TensorDim{"ri", N_RI} });
+```
 
 Conventions:
-- `mu` / `nu` are the two **AO** indices (standard QC notation, and both distinct so the `Tensor`
-  uniqueness invariant is satisfied). `mo` is the **MO** index. `ri` is the **RI / density-fit** index.
+- `ao` is the **AO** index, `mo` the **MO** index, `ri` the **RI / density-fit** index.
+- The two interchangeable AO axes of a tensor are **identical axes** and therefore *share the label `ao`*;
+  Story 06 label rule 2 makes that legal precisely when every occurrence of `ao` in the tensor is bound to
+  the SAME (non-null) `SymGroup` — which is exactly the symmetry we declare here. `mo_coeff` keeps `ao` as
+  a plain (single-occurrence) label alongside its `mo` axis.
+- Symmetry is **advisory** (Story 06, decision Q3): it names the physics and lets no-op work be skipped
+  (e.g. `hcore.transpose(0,1)` is the identity on `double`; `eri3.transpose(0,1)` likewise). It does NOT
+  alter storage (tensors stay dense and full), is not passed to the `TensorBackend`, and does **no**
+  consistency checking of the loaded data.
 - HDF5 datasets are C-order (last index fastest) and `Tensor`'s `data()` is last-dim-fast, so a dataset's
   contiguous `float64` memory maps directly onto the tensor's flat storage **in this label order**. Loading
-  is therefore a direct `HighFive` read of `tensor.data()` with no transposition. (If a future tensor is
-  stored in H5 in a different axis order than we want labelled, a transpose story will handle the swap —
-  out of scope here.)
+  is therefore a direct `HighFive` read of `tensor.data()` with no transposition and no symmetry-dependent
+  work (the two `ao` axes are identical sizes by construction, so a `SymGroup` pair never changes layout).
+  (If a future tensor is stored in H5 in a different axis order than we want labelled, a transpose story will
+  handle the swap — out of scope here.)
 - **Validation before/while loading:** the dataset must exist, be a scalar dataset of `H5T_NATIVE_DOUBLE`
   (double precision), and have the expected rank and dimension sizes (N_AO, N_MO, N_RI) consistent with
   `mo_coeff`/`hcore` (the N_AO in `hcore`, `mo_coeff`, and `eri3` must agree). Mismatches → hard error
@@ -327,8 +369,15 @@ For each test, create a temp HDF5 file at a known path with HighFive, write data
 - **Happy load:** write `hcore`(3×3),`mo_coeff`(3×3),`eri3`(5×3×3) float64 datasets with a deterministic
   fill (e.g. linear ramp); construct a `ParsedInput` pointing at them (`ERI3/HCORE/MO_COEFF`); call
   `load_gf2(...)`; assert
-  - `hcore` rank 2, dims `{mu=3, nu=3}`, `mo_coeff` rank 2 dims `{mu=3, mo=3}`, `eri3` rank 3 dims
-    `{mu=3, nu=3, ri=5}`;
+  - `hcore` rank 2, dims `{ao=3, ao=3}`, `mo_coeff` rank 2 dims `{ao=3, mo=3}`, `eri3` rank 3 dims
+    `{ao=3, ao=3, ri=5}`;
+  - **declared symmetries:** `hcore.dims()[0].symmetry` and `hcore.dims()[1].symmetry` are `same_symgroup`
+    with `kind() == Hermitian`; `eri3`'s two `ao` axes (positions 0 and 1) are `same_symgroup` with
+    `kind() == Symmetric`; `mo_coeff`'s axes (and `eri3`'s `ri` axis) carry a null `SymGroup`
+    (`null_symgroup`);
+  - **symmetry behaviour on the loaded tensors:** `hcore.transpose(0,1)` equals `hcore` (Hermitian on a
+    real scalar is the identity no-op); `eri3.transpose(0,1)` equals `eri3` (Symmetric no-op);
+    `mo_coeff.transpose(0,1)` throws `std::logic_error` (unbound pair — not yet implemented);
   - every stored element equals the written value (full-array sweep, max|err| == 0.0, since it is a copy);
   - `eta` round-trips from the input.
 - **AO-size consistency:** write `hcore` as 3×3 but `mo_coeff` as 4×3 (N_AO mismatch) → `load_gf2` throws
@@ -342,7 +391,8 @@ Create a real input file (e.g. `build/test.in` updated, or a new `gf2.in`) and v
 "finished when …" phrasing:
 
 - `./cppgw -i gf2.in -d rhf_df.h5` → runs the GF2 stub successfully, prints a summary (loaded tensor
-  shapes/labels: `hcore{mu=24,nu=24}`, `mo_coeff{mu=24,mo=24}`, `eri3{mu=24,nu=24,ri=116}`, `eta=…`), exits 0.
+  shapes/labels/symmetries: `hcore{ao=24[hermitian] ×2}`, `mo_coeff{ao=24, mo=24}` (plain),
+  `eri3{ao=24[symmetric] ×2, ri=116}`, `eta=…`), exits 0.
 - `./cppgw gf2.in rhf_df.h5` → identical (positional form).
 - `./cppgw -i badkw.in -d rhf_df.h5` (a file with an unknown keyword such as `HERI3 = eri3`) → prints a
   clear error naming the keyword, exits non-zero.
@@ -354,9 +404,12 @@ Create a real input file (e.g. `build/test.in` updated, or a new `gf2.in`) and v
 ### Definition of done
 
 - `run_input_data_loading_tests()` is wired into `run_tests()`, so `./cppgw -t` runs the existing Story 2–4
-  tests **and** the new A/B tests, all passing (no throw).
+  and Story 6 tests **and** the new A/B tests, all passing (no throw).
 - `./cppgw -i gf2.in -d rhf_df.h5` (and positional form) runs the GF2 stub, loads the three tensors, and
   exits 0 with a visible summary.
+- **The loaded tensors carry their declared symmetries (Story 06 API):** `hcore`'s two `ao` axes are bound
+  by a shared `Hermitian()` `SymGroup`, `eri3`'s two `ao` axes by a shared `Symmetric()` `SymGroup`, and
+  `mo_coeff` is plain; the no-op `transpose(i,j)` on the bound pairs behaves per Story 06.
 - Every hard-error path (A + C) prints an actionable message identifying keyword/line or tensor/axis and
   exits non-zero.
 - No GF2/GW numerics are implemented — ingestion and wiring only.
