@@ -22,7 +22,10 @@ namespace cppgw {
 // tensors on either the host or device.
 // Tensor shape is specified by a list of TensorDim: a tuple of a string label and size_t dimension
 // i.e. a 8x5 matrix is specified by {TensorDim("mu", 8), TensorDim("nu", 5)}
-// The later the index in the list, the faster it is (last index is fast and should be used for contractions)
+// The list is ordered FASTEST to SLOWEST: the FIRST TensorDim is the fastest
+// (innermost, stride 1 / contiguous) and the LAST is the slowest (outermost).
+// The slowest (last) index should be the one used for contractions: the free
+// gemm(...) contracts X's LAST (slowest) axis against Y's FIRST (fastest) axis.
 // This class owns a pointer to a TensorBuffer which implements the storage
 // Operations are delegated to the TensorBackend class (the Story 06 backend seam)
 // which implements the numerical kernels

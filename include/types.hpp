@@ -83,7 +83,7 @@ struct RealTime {
   double value {};
 
   constexpr explicit RealTime(double x) : value(x) {}
-  constexpr bool operator==(const ImaginaryFrequency& o) const noexcept { return value == o.value; }
+  constexpr bool operator==(const RealTime& o) const noexcept { return value == o.value; }
 };
 
 // ω
@@ -92,7 +92,7 @@ struct RealFrequency {
   double value {};
 
   constexpr explicit RealFrequency(double x) : value(x) {}
-  constexpr bool operator==(const ImaginaryFrequency& o) const noexcept { return value == o.value; }
+  constexpr bool operator==(const RealFrequency& o) const noexcept { return value == o.value; }
 };
 
 // Beta
