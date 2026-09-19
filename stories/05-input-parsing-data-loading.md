@@ -43,8 +43,9 @@ should be a valid input file (with a `CALCULATION` line added, see below).
 
 - The keywords `ERI3`, `HCORE`, and `MO_COEFF` must be parsed **case-insensitively** (the value on
   the right-hand side is an HDF5 path).
-- The HDF5 **paths** they specify are **case-sensitive** and must correspond to **actual paths/datasets**
-  in the HDF5 data file. A path that does not name an existing, readable scalar `float64` dataset is an error.
+- The HDF5 **paths** they specify are **case-sensitive** and must correspond to **actual dataset paths**
+  in the HDF5 data file. A path that does not name an existing, readable dataset with `float64` elements is
+  an error.
 - The `eta` keyword is a **double-valued** input. `0.00001` must parse as a double, as must
   `1e-5`, `1E-5`, `1D-5`, `1d-5` (Fortran-style `D` exponents are required). `eta` is the offset used in
   the Green's function for the calculation, but this story's scope is limited to **data ingestion and parsing**.
@@ -107,11 +108,11 @@ should be a valid input file (with a `CALCULATION` line added, see below).
 
 ## Goals
 
-1. **Input parser** that validates the structure of the input file (see Parser spec) and produces a
-   well-typed, defaulted parameter structure (see Data structure).
-2. **GF2 calculation stub** that:
-   - selects the three required datasets (`ERI3`, `HCORE`, `MO_COEFF`) from the parsed input,
-   - verifies each names an existing, readable `float64` scalar dataset in the HDF5 file,
+1. **InputCatalog** that parses, resolves defaults, tracks provenance, sanitizes values, and validates
+   the selected calculation's requirements.
+2. **GF2 calculation input** that:
+   - requests the semantic requirement set (`HCORE`, `ERI3`, `MO_COEFF`, `ETA`) from the catalog,
+   - verifies each dataset keyword names an existing, readable `float64` dataset in the HDF5 file,
    - loads each into a `Tensor<double, Executor::Host>` with physically meaningful dimension labels, and
    - **declares the physical index symmetries** on the loaded tensors via Story 06's `SymmetryGroup` API
      (`include/symmetry.hpp`): `hcore` → its two `ao` axes bound by a shared `Hermitian()` group;
@@ -125,77 +126,177 @@ Hermitian?” — are out of scope; symmetry here is advisory metadata only, per
 
 ---
 
-## Design
+## Proposed input framework
 
-### Data structure / central parameter registry (single source of truth)
+The framework is intentionally a request-oriented catalog rather than a global
+singleton. It centralizes input semantics while keeping calculation code
+explicit about what it needs.
 
-The whole point is that **one** file (`include/input.hpp` + `src/input.cpp`) defines every known keyword,
-its type, its default, its one-line doc string, and which calculations require it. To add a keyword: add one
-row to the registry. To change a default: change it in that row. Nothing in the parser, GF2 stub, or tests
-needs to know per-keyword specifics beyond that table.
+Story 05 introduces an **InputCatalog**. This is the name of the central
+input/data service; it is not a global singleton or a vague "central
+authority". The catalog is the single owner of input vocabulary, defaults,
+validation rules, dataset semantics, and calculation requirements.
+
+The framework has three deliberately small layers:
+
+1. **Definitions** are one registry of known keywords and semantic data
+objects. A definition says how a value is parsed, whether it has a default,
+how it is sanitized, and—for a dataset—what Tensor object it means.
+2. **ResolvedInput** is one validated input file. It retains whether each value
+was supplied by the user or came from a default and exposes typed values.
+3. **InputCatalog** resolves a `ResolvedInput` against one HDF5 file and
+provides the semantic data required by a selected calculation. It opens the
+file once and owns all dataset lookup/validation. Calculations never use raw
+keyword strings, duplicate HDF5 paths, or construct input tensors themselves.
+
+The intended usage is:
 
 ```cpp
-// include/input.hpp  (new)
-namespace cppgw {
+InputCatalog catalog = InputCatalog::from_file(input_path, hdf5_path);
+Gf2Input gf2 = catalog.require_gf2();
 
-enum class Calc { Gf2, /* Gw, ... (future) */ };
-
-enum class ParamKind { String, Double, /* Int, Bool (future) */ };
-
-// One registry row = one known keyword. Canonical spelling is upper-case.
-struct ParamSpec {
-  std::string  keyword;   // canonical upper-case spelling, e.g. "ERI3"
-  ParamKind    kind;      // String (HDF5 path / calculation name) or Double
-  double       dflt;      // default value (only meaningful when kind == Double)
-  bool         has_default; // true if a default exists (kind == Double && dflt is authoritative)
-  const char*  doc;       // one-line description, used in errors/help
-};
-
-// THE single registry — new keywords and defaults are added HERE (and nowhere else).
-// Required-ness is per-calculation, also resolved from this registry.
-const std::vector<ParamSpec>& parameter_registry();   // includes CALCULATION, ERI3, HCORE, MO_COEFF, ETA
-
-// A fully-resolved, keyed parameter value (canonical keyword -> value).
-struct ParamValue { /* kind-tagged holder: std::string for String, double for Double */ };
-
-// A validated, resolved input file. Keys are canonical (upper-case).
-struct ParsedInput {
-  Calc                          calc;                    // the selected calculation
-  std::map<std::string, ParamValue> values;   // canonical keyword -> value (defaults applied where applicable)
-
-  bool       contains   (const std::string& kw) const;   // kw given canonically
-  std::string get_string(const std::string& kw) const;   // throws if absent
-  double     get_double(const std::string& kw) const;    // throws if absent
-  // convenience accessors for this story:
-  std::string eri3_path()   const;
-  std::string hcore_path()  const;
-  std::string mo_coeff_path()const;
-  double      eta()         const;   // already defaulted to 1e-5
-};
-
-// Per-calculation requirement resolution — the ONLY place that says which keywords a calc needs.
-bool is_required(Calc calc, const std::string& canonical_kw);  // e.g. GF2 + "ETA" -> false
-
-// Parses input-file text. Throws std::invalid_argument with an actionable message on any problem.
-ParsedInput parse_input(const std::string& text);              // string in -> testable without files
-ParsedInput parse_input_file(const std::string& path);         // wraps the above over a file
-
-} // namespace cppgw
+// `gf2.hcore` is already a Hermitian AO matrix Tensor;
+// `gf2.eta` is sanitized and `gf2.eta_was_supplied` reports provenance.
+run_gf2(gf2);
 ```
 
-Concrete registry rows (defaults live here — GF2-relevant ones):
+`require_gf2()` is a typed calculation request, not a second loader. It asks
+the catalog for the GF2 requirement set. The catalog checks that the selected
+calculation is GF2, verifies all required values, loads the corresponding
+semantic datasets, and returns an immutable-by-convention value object. A
+future calculation adds another typed requirement set and definitions to the
+same catalog; it does not open the HDF5 file independently.
 
-| keyword      | kind   | default | required for GF2 | meaning |
-|--------------|--------|---------|------------------|---------|
-| `CALCULATION`| String | — (required) | required | selects the calculation (`GF2`) |
-| `ERI3`       | String | — (required) | required | HDF5 path to the RI × AO × AO tensor |
-| `HCORE`      | String | — (required) | required | HDF5 path to the AO × AO core Hamiltonian |
-| `MO_COEFF`   | String | — (required) | required | HDF5 path to the AO × MO coefficients |
-| `ETA`        | Double | `1e-5` | **not required** | Green's-function offset/broadening |
+### Keyword and semantic-data definitions
 
-> Note: the `has_default` / default mechanism is generic (applies to any `Double` row), so `ETA`'s default
-> of `1e-5` is declared in its registry row and applied uniformly by the parser — not special-cased in the
-> GF2 stub. When GW is added, its rows + requirement entries go in the same file.
+A definition is the single source of truth for a keyword. The exact C++
+representation is implementation detail, but it must express the following
+information:
+
+```cpp
+enum class ValueKind { String, Double, Int };
+
+struct ValueDefinition {
+  std::string keyword;                 // canonical spelling, e.g. "ETA"
+  ValueKind kind;
+  std::optional<Value> default_value;  // absent means required when requested
+  std::function<Value(Value)> sanitize;
+  const char* documentation;
+};
+
+struct DatasetDefinition {
+  std::string keyword;                 // e.g. "HCORE"
+  DatasetKind semantic_kind;           // Hcore, MoCoeff, Eri3, ...
+  std::function<Tensor<double, Executor::Host>(DataSet&)> load;
+  const char* documentation;
+};
+```
+
+The registry also records which calculation requirement sets consume each
+keyword. It must not be possible for a calculation to request `HCORE` and
+receive an untyped array: the `HCORE` dataset definition constructs a rank-2
+`double` Tensor with two AO dimensions bound to one fresh `Hermitian()` group.
+Likewise, `ERI3` constructs the documented `{ao, ao, ri}` Tensor with one
+fresh `Symmetric()` group on its AO pair, and `MO_COEFF` constructs a plain
+`{mo, ao}` Tensor. These semantic constructors belong to the catalog/data
+layer, not to GF2 numerical code.
+
+For this story the GF2 requirement set is:
+
+```text
+HCORE, ERI3, MO_COEFF, ETA
+```
+
+`ETA` has a default of `1e-5`; the three datasets are required. Story 07.1
+will extend this set with `OVERLAP`, `DENSITY_MATRIX`, `BETA`,
+`MATSUBARA_HALF_N`, and `MU` in the same framework. Story 07.1 must not add a
+second parser or loader to do so.
+
+### Resolved values and provenance
+
+`ResolvedInput` stores canonical keyword values and provenance:
+
+```cpp
+struct ResolvedInput {
+  Calc calculation() const;
+  bool supplied(std::string_view keyword) const;
+  double eta() const;
+  // analogous typed accessors for paths and future values
+};
+```
+
+A defaulted value is present in the resolved input but `supplied("ETA")` is
+false. A user-provided value is sanitized, stored, and reports true. This
+allows callers to distinguish configuration provenance without re-parsing the
+input or comparing against the default.
+
+Sanitization belongs to the catalog. For example, `ETA` must be finite and
+strictly positive; invalid values are rejected before a calculation receives
+them. The same rule applies whether the value was read from a file or supplied
+through a future programmatic input interface. The catalog should not silently
+repair invalid values. It may normalize syntax such as Fortran `D` exponents
+before validation.
+
+### Proposed public API
+
+The names and exact ownership may be adjusted during implementation, but the
+responsibility boundary should remain:
+
+```cpp
+class InputCatalog {
+public:
+  static InputCatalog from_file(const std::string& input_path,
+                                const std::string& hdf5_path);
+
+  const ResolvedInput& resolved() const;
+  Gf2Input require_gf2() const;
+};
+
+struct Gf2Input {
+  Tensor<double, Executor::Host> hcore;
+  Tensor<double, Executor::Host> mo_coeff;
+  Tensor<double, Executor::Host> eri3;
+  double eta;
+  bool eta_was_supplied;
+};
+```
+
+`Gf2Input` is a semantic requirement object, not a second source of truth.
+It contains already-loaded tensors and validated values. The catalog remains
+responsible for constructing it. The GF2 algorithm receives this object and
+does not know the input keywords or HDF5 paths.
+
+A separate `parse_input(text)` helper is still useful for parser unit tests,
+but it returns the catalog's resolved-input representation rather than an
+independent ad-hoc parameter map. `from_file` performs parsing, default
+resolution, sanitization, file opening, and dataset validation in one normal
+route. A `from_text(text, hdf5_path)` test helper may reuse the same catalog
+pipeline without changing production ownership.
+
+## Parser and registry behavior
+
+The parser accepts the existing assignment format and remains deliberately
+small. Keywords are case-insensitive and canonicalized; HDF5 path values are
+preserved case-sensitively. Unknown and duplicate keywords are hard errors.
+Full-line `#` and `//` comments and blank lines are ignored. Values are trimmed
+at the assignment boundary but are not otherwise rewritten except where the
+value definition explicitly permits syntax normalization.
+
+The keyword grammar should support the planned names:
+
+```text
+KEYWORD = [A-Za-z][A-Za-z0-9_]*
+```
+
+The catalog resolves the selected calculation, applies defaults, sanitizes all
+resolved values, and reports all missing required values together. It must
+reject malformed doubles, non-finite values, invalid integer syntax, and
+invalid semantic ranges with actionable keyword/line diagnostics.
+
+For this story, `ETA` accepts ordinary and Fortran `D`/`d` exponent notation,
+requires full-token consumption, and must be finite and strictly positive.
+`ETA` is retained for compatibility with later Green's-function calculations;
+this story does not use it numerically.
 
 ### Parser spec
 
@@ -205,30 +306,31 @@ Input is text; extension is irrelevant (consistent with Story 2). Line grammar:
 - **Blank**: empty or whitespace-only → ignored.
 - **Comment**: a line whose first non-whitespace char is `#` (and `//` is ALSO treated as a comment start)
   → the whole line is ignored. (Comments keep input files readable; both `#` and `//` are cheap to support.)
-- **Assignment**: `KEYWORD <ws> = <ws> VALUE` where
-  - `KEYWORD` is one or more alphanumerics; matched to the registry by a case-insensitive lookup.
+- **Assignment**: `KEYWORD [ws] = [ws] VALUE` where
+  - `KEYWORD` matches `[A-Za-z][A-Za-z0-9_]*` and is looked up case-insensitively.
   - `VALUE` is the remainder of the line, trimmed of leading/trailing whitespace. Any whitespace inside a
-    String value is preserved as-is (paths with spaces are out of scope, but we do not gratuitously mangle them).
+    string/path value is preserved as-is; quoting and inline comments are out of scope.
 - A line that has content but no `=`, or a `= ` with an empty KEYWORD, is a hard error.
 
 Parse rules:
 
 1. Look up `KEYWORD` in the registry (case-insensitive). **Not found → hard error** whose message names the
    offending keyword and line number. (This is the "unrecognized keyword" rule. There is no warn/ignore path.)
-2. Dispatch by `ParamSpec::kind`:
-   - `String`: store the trimmed VALUE into `ParsedInput.values[canonical_keyword]`.
+2. Dispatch by the keyword definition's value kind:
+   - `String`/`DatasetPath`: store the trimmed value in the resolved-value builder; an empty value is an
+     error for required values.
    - `Double`: parse VALUE as a double (see Double parsing). On failure → hard error naming the keyword,
      the offending token, and the line.
 3. After all lines are read, resolve the **calculation**:
    - No `CALCULATION` keyword → hard error ("must select a calculation").
    - `CALCULATION` value → matched case-insensitively against known calcs; `GF2` → `Calc::Gf2`. Unrecognized
      name → hard error naming the value.
-4. **Requirement check** for the selected calc: for every keyword where `is_required(calc, kw)` is true, it
-   must be present in `values`; otherwise a hard error listing all missing required keywords at once.
-5. **Default application**: for the selected calc, any `Double` keyword that is not required, has a default
-   (`has_default`), and is not present in the input is set to its registry default. (So `ETA` becomes `1e-5`
-   when omitted.)
-6. Return the `ParsedInput`.
+4. **Requirement check** for the selected calculation: every keyword in its catalog requirement set must be
+   present either in the input or as a defined default; otherwise report all missing required keywords at once.
+5. **Default application and sanitization**: apply typed defaults, record provenance, and run every value
+   through its definition's sanitizer. For example, `ETA` becomes `1e-5` when omitted and must be finite and
+   strictly positive when supplied.
+6. Return the resolved-input portion of the `InputCatalog`.
 
 **Duplicate keywords:** a keyword given twice on different lines is a hard error (ambiguous input), not last-wins.
 
@@ -243,25 +345,24 @@ Parse rules:
 
 ### Data loading (GF2) & dimension labels
 
-`include/gf2.hpp` (new):
+`InputCatalog::require_gf2()` returns the following semantic requirement
+object (the exact header placement is implementation detail):
 
 ```cpp
-// include/gf2.hpp  (new). Includes "symmetry.hpp" (Story 06).
 struct Gf2Input {
-  Tensor<double, Executor::Host> hcore;     // AO × AO          (24 × 24)  — `ao`,`ao` bound by a shared Hermitian() SymGroup
-  Tensor<double, Executor::Host> mo_coeff;  // AO × MO          (24 × 24)  — plain `ao`,`mo`, no SymGroup
-  Tensor<double, Executor::Host> eri3;      // RI × AO × AO     (116 × 24 × 24) — `ao`,`ao` bound by a shared Symmetric() SymGroup, plain `ri`
-  double eta = 1e-5;                        // from input (defaulted)
+  Tensor<double, Executor::Host> hcore;     // AO × AO, shared Hermitian group
+  Tensor<double, Executor::Host> mo_coeff;  // AO × MO, plain axes
+  Tensor<double, Executor::Host> eri3;      // RI × AO × AO, shared symmetric AO group
+  double eta;
+  bool eta_was_supplied;
 };
-
-// Loads the three tensors named by `pin` out of the HDF5 file at `h5path`,
-// constructing each Tensor with its physical labels AND its declared symmetries
-// (see the Dimension labels section). The data is stored exactly as written in the file:
-// symmetries are advisory metadata (Story 06), never used to alter storage.
-// Throws std::invalid_argument / std::runtime_error on a missing dataset, a non-float64 dataset,
-// or a dimension mismatch.
-Gf2Input load_gf2(const ParsedInput& pin, const std::string& h5path);
 ```
+
+The catalog opens the HDF5 file once and loads the datasets named by the
+resolved keyword paths. It constructs each Tensor with its physical labels and
+advisory symmetries, validates element type/rank/extents, and returns the
+requirement object. There is no public `load_gf2(pin, path)` function that
+allows GF2 code to bypass the catalog.
 
 **Dimension labels** (physical meaning; by Story 06 label rule 2 the interchangeable pair may — must —
 share one label bound by a shared `SymmetryGroup`):
@@ -299,10 +400,11 @@ Conventions:
   work (the two `ao` axes are identical sizes by construction, so a `SymGroup` pair never changes layout).
   (If a future tensor is stored in H5 in a different axis order than we want labelled, a transpose story will
   handle the swap — out of scope here.)
-- **Validation before/while loading:** the dataset must exist, be a scalar dataset of `H5T_NATIVE_DOUBLE`
-  (double precision), and have the expected rank and dimension sizes (N_AO, N_MO, N_RI) consistent with
-  `mo_coeff`/`hcore` (the N_AO in `hcore`, `mo_coeff`, and `eri3` must agree). Mismatches → hard error
-  naming the tensor and the offending axis.
+- **Validation before/while loading:** the dataset must exist, be a dataset whose element type is equivalent
+  to `double` (not an integer or silently converted float type), and have the expected rank and dimension
+  sizes (N_AO, N_MO, N_RI) consistent with the other semantic objects. The N_AO in `hcore`, `mo_coeff`,
+  and both AO axes of `eri3` must agree. Mismatches are hard errors naming the semantic object, keyword,
+  dataset path, and offending axis.
 
 ### Error handling & exit codes
 
@@ -310,20 +412,20 @@ Conventions:
   keyword, duplicate keyword, unrecognized calculation name) → `std::invalid_argument` from the parser, with a
   message that names the keyword **and line number** where known.
 - Data problems (dataset not found, wrong type, rank/size mismatch) → `std::runtime_error` /
-  `std::invalid_argument` from `load_gf2`, naming the tensor + tensor path value.
+  `std::invalid_argument` from `InputCatalog::require_gf2()`, naming the semantic object, keyword, and
+  dataset path value.
 - The CLI (`main.cpp`) already routes `-i/-d` into `check_input_file`/`check_data_file`; update the normal
-  mode to: `parse_input_file(opt.input)` → select GF2 → `load_gf2(...)` → (for now) print a short summary of
-  the loaded tensors (shapes/labels + `eta`) so a successful run is visible, then return 0. A thrown
-  exception prints the message to `std::cerr` and returns non-zero (2), **not** the help page (help is only
-  for bad *invocations*, per Story 2).
+  mode to: `InputCatalog::from_file(opt.input, opt.data)` → `require_gf2()` → print a short summary of the
+  loaded tensors (shapes/labels + `eta` and whether it was supplied) → return 0. A thrown exception prints
+  the message to `std::cerr` and returns non-zero (2), **not** the help page (help is only for bad
+  *invocations*, per Story 2).
 
 ### Files touched / added
 
-- `include/input.hpp` (new) — `Calc`, `ParamKind`, `ParamSpec`, `ParsedInput`, `parse_input`,
-  `parse_input_file`, `is_required` declarations + the registry.
-- `src/input.cpp` (new) — registry contents, line parser, double parser, requirement/default resolution.
-- `include/gf2.hpp` (new) — `Gf2Input`, `load_gf2`.
-- `src/gf2.cpp` (new) — HighFive dataset validation + `Tensor<double, Executor::Host>` loading.
+- `include/input.hpp` / `src/input.cpp` (new) — `InputCatalog`, resolved values/provenance,
+  semantic definitions, parser, defaulting, and sanitization.
+- `include/gf2.hpp` / `src/gf2.cpp` (new) — `Gf2Input` and the catalog's typed GF2 requirement
+  implementation, including HighFive validation and semantic Tensor construction.
 - `src/main.cpp` — wire GF2 selection + loading into normal mode; add `Calc` selection from parsed input.
 - `src/tests.cpp` / `src/tests.hpp` — add `run_input_data_loading_tests()`; call it from `run_tests()`.
 - `CMakeLists.txt` — add `src/input.cpp` and `src/gf2.cpp` to `add_executable(cppgw ...)`.
@@ -367,8 +469,8 @@ then load it — no dependency on `build/rhf_df.h5`), plus a **CLI smoke check**
 For each test, create a temp HDF5 file at a known path with HighFive, write datasets with known values:
 
 - **Happy load:** write `hcore`(3×3),`mo_coeff`(3×3),`eri3`(5×3×3) float64 datasets with a deterministic
-  fill (e.g. linear ramp); construct a `ParsedInput` pointing at them (`ERI3/HCORE/MO_COEFF`); call
-  `load_gf2(...)`; assert
+  fill (e.g. linear ramp); construct an `InputCatalog` pointing at them (`ERI3/HCORE/MO_COEFF`); call
+  `catalog.require_gf2()`; assert
   - `hcore` rank 2, dims `{ao=3, ao=3}`, `mo_coeff` rank 2 dims `{ao=3, mo=3}`, `eri3` rank 3 dims
     `{ao=3, ao=3, ri=5}`;
   - **declared symmetries:** `hcore.dims()[0].symmetry` and `hcore.dims()[1].symmetry` are `same_symgroup`
@@ -380,7 +482,7 @@ For each test, create a temp HDF5 file at a known path with HighFive, write data
     `mo_coeff.transpose(0,1)` throws `std::logic_error` (unbound pair — not yet implemented);
   - every stored element equals the written value (full-array sweep, max|err| == 0.0, since it is a copy);
   - `eta` round-trips from the input.
-- **AO-size consistency:** write `hcore` as 3×3 but `mo_coeff` as 4×3 (N_AO mismatch) → `load_gf2` throws
+- **AO-size consistency:** write `hcore` as 3×3 but `mo_coeff` as 4×3 (N_AO mismatch) → `catalog.require_gf2()` throws
   naming the offending tensor/axis.
 - **Missing dataset:** point a path at a name that does not exist (e.g. `ERI3 = nope`) → throws.
 - **Wrong element type:** write `hcore` as `int32` → throws (only `double` accepted).
@@ -418,9 +520,11 @@ Create a real input file (e.g. `build/test.in` updated, or a new `gf2.in`) and v
 
 ## Open / noted for later (out of scope here)
 
-- **GW** calculation: add its registry rows + `is_required` entries + a `load_gw()` in the same files.
+- **GW** calculation: add its semantic definitions and typed requirement set to `InputCatalog` in the same
+  files; do not add a second loader.
 - **Transpose / index-permutation on load:** not needed for the tensors as stored today; a future story.
 - **Other `float64` tensors** in `rhf_df.h5` (`overlap`, `density_matrix`, `mo_energy`, …): not used here;
   the registry makes them easy to add if a future calc needs them.
-- **Device-side loading** and multi-file / group-nested HDF5 layouts: out of scope (this story assumes root-level
-  scalar datasets, as in the example file).
+- **Device-side loading** and multi-file HDF5 layouts: out of scope. Dataset values may use ordinary HDF5
+  paths (including groups), but the catalog opens one file and reads dense datasets only; sparse, compound,
+  or object-valued datasets are out of scope.
