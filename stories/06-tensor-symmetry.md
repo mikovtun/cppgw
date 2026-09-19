@@ -1,5 +1,10 @@
 # Story 06 — Tensor index symmetry & the Tensor backend seam
 
+> **Status note:** Story 06 originally deferred active permutation of distinct
+> axes. That follow-up is implemented in **Story 06.1 — General Tensor axis
+> permutation and transpose**. The symmetry-aware same-group behavior described
+> here remains part of the public `Tensor::transpose(i, j)` contract.
+
 ## Motivation
 
 Some physical quantities have symmetry in their indices, and the current `Tensor` machinery has no
@@ -66,8 +71,8 @@ and narrows its scope to what only *we* own:
   - `Hermitian`/`Antisymmetric` on a **complex** scalar carry their conjugation/sign semantics.
 - **Scope limit (the real one, not "adjacency"):** only **pairwise (2-axis) relations** this story, at
   *any* index positions (adjacency is not required — see *Why adjacency isn't the right boundary*).
-  **Multi-member / transitive symmetry groups** (the full rank-4 double-exchange orbit) and the **active
-  transpose/permutation primitive** for non-identical axes are deferred to a future story.
+  **Multi-member / transitive symmetry groups** (the full rank-4 double-exchange orbit) remain deferred.
+  Active permutation of distinct axes is specified separately in Story 06.1.
 
 ---
 
@@ -86,8 +91,8 @@ The instinct is to restrict symmetries to *adjacent* index pairs, because that's
    interchangeable under kind K") is a single fact to store and look up. A *multi-member* group (an axis
    with >2 interchangeable twins, e.g. the full `(μν|λσ)` double-exchange) is a permutation *set*; using
    it correctly requires orbit math and — for `gemm`/output-shape consistency — a genuine transpose
-   primitive for non-identical axes. That is the expensive part, so **that** (not adjacency) is what is
-   deferred.
+   primitive for non-identical axes. That is the expensive part, so **that** (not adjacency) was
+   deferred to Story 06.1.
 
 Concretely, in scope: any number of *distinct* symmetric/Hermitian/antisymmetric **pairs**, at any
 positions, e.g. `Tensor<...>{ {ao_i,30,g1},{ao_j,30,g2},{ao_k,40},{ao_i,30,g1},{ao_j,30,g2} }`.
@@ -110,12 +115,11 @@ Out of scope: asserting all four above are in one group, or that `ao_i` is inter
    `conjugate`) on the host. Host kernels remain hand-written this story.
 5. **Realize goal (B)** with a small, honest primitive: `Tensor::transpose(i, j)` that, when `(i,j)` is
    a symmetry-bound pair, returns the no-op result *without* reordering storage (identity / conjugate /
-   negate), and throws a clear "not yet implemented" for a non-identical axis pair (the real transpose is
-   the future story).
+   negate). Active permutation of non-identical axes is specified separately in Story 06.1.
 6. **Wire the physics into GF2** (linking Stories 05 and 07): `hcore`→Hermitian, `eri3`→symmetric on its two
    AO axes, `mo_coeff`→none, using the new API.
 
-Out of scope: multi-member symmetry groups, active transpose of non-identical axes, symmetry *propagation*
+Out of scope: multi-member symmetry groups and symmetry *propagation*
 to `gemm` outputs (the caller declares the output's symmetry), data-validity checks ("is `hcore` actually
 Hermitian?"), storage compression, and any BLAS/Eigen/cuTENSOR backend.
 
@@ -261,10 +265,9 @@ addressing without ever requiring the axes to be adjacent.
   - **Position-agnostic** (consistent with *Why adjacency isn't the right boundary*): the symmetric pair has
     identical sizes (rule 1), so transposing axes `i`,`j` leaves the flat layout unchanged, and the elementwise
     op is correct whether or not `i`,`j` are adjacent, and regardless of other axes.
-  - otherwise (out-of-range position, or `i`,`j` are *not* bound by the same `SymGroup`) → throw
-    `std::logic_error("Tensor::transpose: transpose of non-identical axes not yet implemented (Story 06);
-    use a SymmetryGroup-bound pair for the no-op case")`.
-  - The *active* permutation of genuinely distinct axes remains the deferred story.
+  - otherwise (out-of-range position, or `i`,`j` are *not* bound by the same `SymGroup`), the
+    symmetry shortcut does not apply. Story 06.1 supplies the physical permutation
+    path for valid distinct-axis pairs.
 
 ### `TensorBackend` seam (replaces/augments `LinAlgBackend`)
 
@@ -347,13 +350,14 @@ failure). No external files needed.
 ### Symmetry queries
 - `hcore` (Hermitian on `double`): `transpose(0,1)` equals `hcore` (conjugation is a no-op on reals).
 - `eri3` (Symmetric): `transpose` over the two `ao` axes (positions 1 and 2) → equals `eri3`;
-  `transpose(0, 1)` (ri↔ao, NOT a bound pair) → throws `std::logic_error`.
+  `transpose(0, 1)` (ri↔ao, NOT a bound pair) → performs a physical axis swap as
+  specified by Story 06.1.
 - An **Antisymmetric** pair (complex or real): `transpose(i,j) == -T` elementwise (diagonal would be 0 in a
   true antisymmetric matrix — we do NOT check this; just verify the sign flip).
 - A **complex Hermitian** tensor: `transpose(i,j)` returns `conj(T)` elementwise (values checked).
 - `label_indices("ao")` on `eri3` → `{1,2}`; `label_index("ao")` → `1` (first); `has_label` true.
-- `mo_coeff {ao, mo}`: `label_indices("ao")=={0}`, `label_indices("mo")=={1}`, no bound pair
-  (any `transpose` throws not-yet-implemented).
+- `mo_coeff {ao, mo}`: `label_indices("ao")=={0}`, `label_indices("mo")=={1}`, no bound pair;
+  a distinct-axis `transpose` performs a physical permutation.
 
 ### `gemm` on symmetric tensors (regression + new)
 - Contract the `eri3`-style `{ri, ao, ao}` over one `ao` against a vector/matrix on `ao`; confirm the
@@ -375,7 +379,8 @@ failure). No external files needed.
   (conjugation is a no-op on reals).
 - Antisymmetric pair → result equals `-T` elementwise.
 - `transpose(i,j)` is identical to `transpose(j,i)` (symmetric in its arguments) for every bound pair.
-- Non-bound pair (or out-of-range position) → throws `std::logic_error` with the documented message.
+- Out-of-range position → throws the documented range error. A non-bound pair performs
+  a physical permutation according to Story 06.1.
 
 ### GF2 linkage (ties to Stories 05 and 07)
 - Build the GF2 input set with the new API: `hcore{ao,ao}=Hermitian()`, `mo_coeff{ao,mo}`=plain,
@@ -388,8 +393,9 @@ failure). No external files needed.
   2–5 + these) with no throws.
 - `eri3`/`eri4`/`hcore` examples in the draft construct using identical labels + a shared `SymGroup`, as
   sketched above.
-- `Tensor::transpose(i,j)` is a genuine no-op (identity / conjugate / negate) on symmetry-bound pairs and
-  throws a clear "not yet implemented" otherwise — no physical permutation code is added.
+- `Tensor::transpose(i,j)` retains the identity / conjugate / negate behavior on
+  symmetry-bound pairs, while distinct valid axes use the physical permutation
+  specified by Story 06.1.
 - The `TensorBackend` seam is in place; host `gemm` + unary ops live behind it; BLAS/Eigen/cuTENSOR are
   **not** integrated (that is a future story that only adds backend implementations).
 - All pre-existing tests (Story 2 grid/tensor/gemm, Story 3 Fourier, Story 4 inverse Fourier) still pass
@@ -401,8 +407,8 @@ failure). No external files needed.
 
 - **Multi-member / transitive symmetry groups** (rank-4 `(μν|λσ)` double-exchange orbit) — the pairwise
   model here generalizes to them, but group closure + orbit reasoning is the hard part.
-- **Active transpose / index-permutation primitive** for *non-identical* axes (reorder + stride
-  recompute + storage move). Only the *no-op* case is implemented here.
+- **General active transpose / index-permutation implementation details** are
+  specified by Story 06.1; this story defines only the symmetry-aware shortcut.
 - **Symmetry-aware kernels** (delegate to / exploit backend symmetries; e.g. cuTENSOR symmetry dispatch,
   Hermitian `gemm` shortcuts).
 - **Symmetry propagation** to `gemm` outputs (derive the output's symmetry groups from the operands'

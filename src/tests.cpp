@@ -276,7 +276,7 @@ int run_tests() {
   // ---- Story 04: inverse (Matsubara -> tau) Fourier transform ----
   run_inverse_fourier_tests();
 
-  // ---- Story 06: index symmetry, TensorBackend seam, no-op transpose ---
+  // ---- Story 06/06.1: index symmetry, TensorBackend seam, and transpose ---
   run_tensor_symmetry_tests();
 
   return 0;
@@ -285,8 +285,7 @@ int run_tests() {
 using cplx = std::complex<double>;
 
 namespace {
-// Exception-checking helper (logic_error specifically, for the transpose
-// not-yet-implemented contract).
+// Exception-checking helper for logic_error-derived validation failures.
 template <typename F>
 bool throws_le(F&& f, const char* expected_substring = "") {
   try { f(); }
@@ -443,21 +442,132 @@ int run_tensor_symmetry_tests() {
       r12(1, 1, 1) = -999.0;
       if (eri3(1, 1, 1) == -999.0)
         throw std::runtime_error("symmetry tests: transpose aliasing corrupted the source");
-      // ri<->ao (0,1) is NOT a bound pair (ri is plain) -> logic_error.
-      if (!throws_le([&]{ eri3.transpose(0, 1); }))
-        throw std::runtime_error("symmetry tests: transpose(0,1) failed to throw");
-      // Out-of-range position -> logic_error.
+      // ri<->ao (0,1) is NOT a bound pair (ri is plain), so this is now a
+      // physical transpose. The output order is [ao, ri, ao] and
+      // out(j,i,k) == eri3(i,j,k).
+      auto r01 = eri3.transpose(0, 1);
+      if (r01.dims()[0].label != TensorDimLabel("ao")
+          || r01.dims()[0].dim != 4
+          || r01.dims()[1].label != TensorDimLabel("ri")
+          || r01.dims()[1].dim != 3
+          || r01.dims()[2].label != TensorDimLabel("ao")
+          || r01.dims()[2].dim != 4)
+        throw std::runtime_error("transpose tests: distinct-axis transpose metadata wrong");
+      for (size_t k = 0; k < 4; ++k)
+        for (size_t i = 0; i < 3; ++i)
+          for (size_t j = 0; j < 4; ++j)
+            if (r01(j, i, k) != eri3(i, j, k))
+              throw std::runtime_error("transpose tests: distinct-axis transpose values wrong");
+      // Out-of-range position remains an error.
       if (!throws_le([&]{ eri3.transpose(1, 9); }))
         throw std::runtime_error("symmetry tests: transpose oob did not throw");
     }
 
-    // mo_coeff {ao, mo}: no bound pair -> ANY transpose is not-yet-implemented.
+    // mo_coeff {ao, mo}: no bound pair -> a physical rectangular transpose.
     {
       Tensor<double, Executor::Host> mo({TensorDim{"ao", 3}, TensorDim{"mo", 2}});
       if (mo.label_indices("ao").size() != 1 || mo.label_indices("mo").size() != 1)
         throw std::runtime_error("symmetry tests: mo_coeff label indices wrong");
-      if (!throws_le([&]{ mo.transpose(0, 1); }))
-        throw std::runtime_error("symmetry tests: mo_coeff transpose must throw");
+      for (size_t j = 0; j < 2; ++j)
+        for (size_t i = 0; i < 3; ++i)
+          mo(i, j) = 10.0 * i + j;
+      auto mt = mo.transpose(0, 1);
+      if (mt.dims()[0].label != TensorDimLabel("mo") || mt.dims()[0].dim != 2
+          || mt.dims()[1].label != TensorDimLabel("ao") || mt.dims()[1].dim != 3)
+        throw std::runtime_error("transpose tests: rectangular transpose metadata wrong");
+      for (size_t j = 0; j < 2; ++j)
+        for (size_t i = 0; i < 3; ++i)
+          if (mt(j, i) != mo(i, j))
+            throw std::runtime_error("transpose tests: rectangular transpose values wrong");
+      if (mt.data() == mo.data())
+        throw std::runtime_error("transpose tests: rectangular transpose aliased storage");
+    }
+
+    // General permutation: a non-self-inverse rank-three permutation must
+    // follow permutation[new_axis] = old_axis, not the inverse convention.
+    {
+      Tensor<double, Executor::Host> src({TensorDim{"a", 2}, TensorDim{"b", 3}, TensorDim{"c", 4}});
+      for (size_t c = 0; c < 4; ++c)
+        for (size_t b = 0; b < 3; ++b)
+          for (size_t a = 0; a < 2; ++a)
+            src(a, b, c) = 100.0 * a + 10.0 * b + c;
+
+      auto p = src.permute_axes({2, 0, 1});
+      if (p.rank() != 3
+          || p.dims()[0].label != TensorDimLabel("c") || p.dims()[0].dim != 4
+          || p.dims()[1].label != TensorDimLabel("a") || p.dims()[1].dim != 2
+          || p.dims()[2].label != TensorDimLabel("b") || p.dims()[2].dim != 3)
+        throw std::runtime_error("transpose tests: general permutation metadata wrong");
+      for (size_t b = 0; b < 3; ++b)
+        for (size_t a = 0; a < 2; ++a)
+          for (size_t c = 0; c < 4; ++c)
+            if (p(c, a, b) != src(a, b, c))
+              throw std::runtime_error("transpose tests: general permutation values wrong");
+
+      // The inverse of [2,0,1] under the documented convention is [1,2,0].
+      auto roundtrip = p.permute_axes({1, 2, 0});
+      if (!tensor_allclose(src, roundtrip))
+        throw std::runtime_error("transpose tests: permutation round trip failed");
+      if (p.data() == src.data())
+        throw std::runtime_error("transpose tests: general permutation aliased storage");
+    }
+
+    // The raw physical permutation is deliberately distinct from the
+    // Story-06 semantic same-group transpose shortcut.
+    {
+      auto g = Hermitian();
+      Tensor<cplx, Executor::Host> h(
+          {TensorDim{"x", 2, g}, TensorDim{"x", 2, g}});
+      h(0, 0) = cplx(1.0, 2.0);
+      h(1, 0) = cplx(3.0, 4.0);
+      h(0, 1) = cplx(5.0, 6.0);
+      h(1, 1) = cplx(7.0, 8.0);
+      auto semantic = h.transpose(0, 1);
+      auto physical = h.permute_axes({1, 0});
+      for (size_t n = 0; n < h.total_elements(); ++n) {
+        if (semantic.linear(n) != std::conj(h.linear(n)))
+          throw std::runtime_error("transpose tests: semantic Hermitian transpose changed");
+      }
+      if (physical(0, 1) != h(1, 0) || physical(1, 0) != h(0, 1))
+        throw std::runtime_error("transpose tests: raw symmetry-bound permutation wrong");
+      if (physical.linear(0) == semantic.linear(0)
+          && physical.linear(1) == semantic.linear(1))
+        throw std::runtime_error("transpose tests: raw permutation collapsed into semantic shortcut");
+    }
+
+    // Invalid permutations and edge cases.
+    {
+      Tensor<double, Executor::Host> src({TensorDim{"a", 2}, TensorDim{"b", 3}});
+      if (!throws_ia([&]{ src.permute_axes({0}); }))
+        throw std::runtime_error("transpose tests: short permutation did not throw");
+      if (!throws_ia([&]{ src.permute_axes({0, 0}); }))
+        throw std::runtime_error("transpose tests: duplicate permutation axis did not throw");
+      if (!throws_le([&]{ src.permute_axes({0, 2}); }))
+        throw std::runtime_error("transpose tests: out-of-range permutation axis did not throw");
+      if (!throws_le([&]{ src.transpose(0, 2); }))
+        throw std::runtime_error("transpose tests: out-of-range transpose axis did not throw");
+
+      std::vector<TensorDim> scalar_dims;
+      Tensor<double, Executor::Host> scalar(scalar_dims);
+      scalar.linear(0) = 42.0;
+      auto scalar_copy = scalar.permute_axes({});
+      if (scalar_copy.rank() != 0 || scalar_copy.linear(0) != 42.0
+          || scalar_copy.data() == scalar.data())
+        throw std::runtime_error("transpose tests: rank-zero permutation failed");
+
+      Tensor<double, Executor::Host> empty;
+      auto empty_copy = empty.permute_axes({});
+      if (empty_copy.rank() != 0 || empty_copy.total_elements() != 0
+          || empty_copy.allocated())
+        throw std::runtime_error("transpose tests: unallocated empty permutation failed");
+
+      Tensor<double, Executor::Host> zero({TensorDim{"a", 0}, TensorDim{"b", 2}});
+      auto zero_permuted = zero.permute_axes({1, 0});
+      if (zero_permuted.dims()[0].label != TensorDimLabel("b")
+          || zero_permuted.dims()[1].label != TensorDimLabel("a")
+          || zero_permuted.total_elements() != 0
+          || zero_permuted.allocated())
+        throw std::runtime_error("transpose tests: zero-sized permutation failed");
     }
 
     // Antisymmetric pair (real): transpose(i,j) == -T elementwise.
@@ -684,8 +794,10 @@ int run_tensor_symmetry_tests() {
     if (mo_coeff.rank() != 2 || !null_symgroup(mo_coeff.dims()[0].symmetry)
         || !null_symgroup(mo_coeff.dims()[1].symmetry))
       throw std::runtime_error("symmetry tests: GF2 mo_coeff shape/symmetry wrong");
-    if (!throws_le([&]{ mo_coeff.transpose(0, 1); }))
-      throw std::runtime_error("symmetry tests: GF2 mo_coeff transpose must throw");
+    auto mo_transposed = mo_coeff.transpose(0, 1);
+    if (mo_transposed.dims()[0].label != TensorDimLabel("mo")
+        || mo_transposed.dims()[1].label != TensorDimLabel("ao"))
+      throw std::runtime_error("symmetry tests: GF2 mo_coeff transpose metadata wrong");
 
     if (eri3.rank() != 3 || eri3.label_indices("ao").size() != 2
         || eri3.dims()[1].symmetry->kind() != SymKind::Symmetric)

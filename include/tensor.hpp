@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <optional>
 #include <span>
+#include <initializer_list>
 #include <ranges>
 #include <iostream>
 #include <typeinfo>
@@ -112,6 +113,31 @@ private:
   }
 
   void validate_dims_and_symmetry() const { validate_dims_and_symmetry(dims_); }
+
+  // Validate the public permutation convention used by permute_axes:
+  // permutation[new_axis] = old_axis. Returning an owned vector keeps the
+  // validated sequence available throughout the backend call.
+  static std::vector<size_t> checked_permutation(std::span<const size_t> permutation,
+                                                  size_t rank) {
+    if (permutation.size() != rank)
+      throw std::invalid_argument("Tensor::permute_axes: expected a permutation of rank "
+          + std::to_string(rank) + ", but got " + std::to_string(permutation.size())
+          + " entries");
+
+    std::vector<bool> seen(rank, false);
+    std::vector<size_t> out(permutation.begin(), permutation.end());
+    for (size_t new_axis = 0; new_axis < rank; ++new_axis) {
+      const size_t old_axis = out[new_axis];
+      if (old_axis >= rank)
+        throw std::out_of_range("Tensor::permute_axes: axis " + std::to_string(old_axis)
+            + " is out of range for rank " + std::to_string(rank));
+      if (seen[old_axis])
+        throw std::invalid_argument("Tensor::permute_axes: axis " + std::to_string(old_axis)
+            + " occurs more than once");
+      seen[old_axis] = true;
+    }
+    return out;
+  }
 
   // Shared by both operator() overloads: validates the index count and the
   // bounds of each index, and returns the linear storage offset. Argument #k
@@ -329,56 +355,115 @@ public:
   }
 
   // ============================================================================
-  //  Tensor::transpose(i, j)  —  the NO-OP-ECQUIVALENT of a symmetry transpose
+  //  General axis permutation
   // ----------------------------------------------------------------------------
-  //  Story 06 goal (B): when axes i and j are bound to the SAME SymGroup,
-  //  "transposing" them never reorders storage — the pair has identical sizes,
-  //  so the flat layout is unchanged — and the correct result is served by a
-  //  cheap elementwise op (or an identity copy) chosen by the group's kind:
-  //    * Symmetric, or Hermitian on a REAL scalar (conjugation is a no-op
-  //      when there is no imaginary part to flip)        -> identity copy
-  //    * Hermitian on a COMPLEX scalar                   -> elementwise conjugate
-  //    * Antisymmetric (complex or real)                 -> elementwise negation
-  //  Deliberately NOT a physical index permutation: no restride, no data
-  //  movement, works whether or not i,j are adjacent. Tensor has no view type,
-  //  so the result is a by-value deep copy — that is fine and intended; the
-  //  payoff is that a real transpose is never implemented here.
+  //  `permutation[new_axis] = old_axis`. The output dimensions and data are
+  //  reordered together; TensorDim labels, sizes, and SymGroup handles move
+  //  with their axes. The backend sees only dense storage metadata and never
+  //  labels or symmetry.
   //
-  //  Otherwise (i or j out of range, or the pair is NOT bound to the same
-  //  SymGroup — including both plain) this throws std::logic_error:
-  //  the ACTIVE transpose of genuinely distinct axes is a future story.
-  //  (Advisory: no data-validity check is done — the tensor is not examined
-  //  to confirm it actually satisfies its declared symmetry.)
-  // @throws std::logic_error     pair not bound to a shared non-null SymGroup,
-  //                              or i/j out of range (not-yet-implemented)
-  // @note  Device-safe: the elementwise work goes through the TensorBackend
-  //         contract (conjugate / scale), which is executor-templated.
+  //  This returns an independently-owned deep copy. Tensor has no view type,
+  //  and in-place permutation is deliberately out of scope.
+  Tensor permute_axes(std::span<const size_t> permutation) const {
+    const std::vector<size_t> p = checked_permutation(permutation, rank());
+
+    std::vector<TensorDim> output_dims;
+    std::vector<size_t> output_sizes;
+    output_dims.reserve(rank());
+    output_sizes.reserve(rank());
+    for (size_t new_axis = 0; new_axis < rank(); ++new_axis) {
+      output_dims.push_back(dims_[p[new_axis]]);
+      output_sizes.push_back(dims_[p[new_axis]].dim);
+    }
+
+    // Build the result explicitly instead of using Tensor(output_dims): this
+    // preserves the distinction between an allocated scalar Tensor and the
+    // default/unallocated Tensor state.
+    Tensor out;
+    out.dims_ = std::move(output_dims);
+    validate_dims_and_symmetry(out.dims_);
+    out.compute_strides();
+    // The default Tensor is a distinct unallocated state from an allocated
+    // rank-zero scalar (whose empty shape has one element). Preserve that
+    // distinction across the identity permutation.
+    if (!buffer_ && dims_.empty() && total_elements_ == 0)
+      out.total_elements_ = 0;
+    if (buffer_) {
+      out.allocate();
+      if (total_elements_ > 0) {
+        using Backend = TensorBackend<scalar_type, exec>;
+        Backend::permute(
+            buffer(),
+            std::span<const size_t>(strides_.data(), strides_.size()),
+            std::span<const size_t>(output_sizes.data(), output_sizes.size()),
+            std::span<const size_t>(out.strides_.data(), out.strides_.size()),
+            std::span<const size_t>(p.data(), p.size()),
+            out.buffer());
+      }
+    }
+    return out;
+  }
+
+  Tensor permute_axes(const std::vector<size_t>& permutation) const {
+    return permute_axes(std::span<const size_t>(permutation.data(), permutation.size()));
+  }
+
+  Tensor permute_axes(std::initializer_list<size_t> permutation) const {
+    return permute_axes(std::span<const size_t>(permutation.begin(), permutation.size()));
+  }
+
+  // ============================================================================
+  //  Tensor::transpose(i, j)
+  // ----------------------------------------------------------------------------
+  //  This is the pairwise semantic convenience operation. For a pair bound to
+  //  the SAME non-null SymGroup, preserve Story 06's advisory symmetry
+  //  behavior: identity for Symmetric / real Hermitian, conjugation for
+  //  complex Hermitian, and negation for Antisymmetric. No data permutation is
+  //  needed in that case.
+  //
+  //  For two distinct, non-bound axes, perform a physical two-axis permutation
+  //  through permute_axes(). Thus the old Story 06 "not implemented" path is
+  //  now a real transpose. The lower-level permute_axes() operation is always
+  //  a raw physical permutation and never applies symmetry conjugation or
+  //  sign rules.
+  //
+  //  No data-validity check is made: symmetry remains advisory metadata.
   Tensor transpose(size_t i, size_t j) const {
     if (i >= dims_.size() || j >= dims_.size())
-      throw std::logic_error("Tensor::transpose: index out of range (rank "
-          + std::to_string(dims_.size()) + "); transpose of non-identical axes not yet "
-          + "implemented (Story 06); use a SymmetryGroup-bound pair for the no-op case");
-    const SymGroup& g = dims_[i].symmetry;
-    // Resolve the pair through the Story 06 symmetry machinery: both positions
-    // must be bound to the SAME (non-null) SymGroup (handle identity).
-    if (null_symgroup(g) || dims_[j].symmetry != g)
-      throw std::logic_error("Tensor::transpose: transpose of non-identical axes not yet "
-          "implemented (Story 06); use a SymmetryGroup-bound pair for the no-op case");
-    using Backend = TensorBackend<scalar_type, exec>;
-    const SymKind k = g->kind();
-    // Symmetric -> identity; Hermitian on a real scalar -> identity (the complex
-    // conjugate is a no-op when the scalar has no imaginary part), decided by the
-    // codebase's floating-point scalar taxonomy (multiprecision.hpp):
-    // an elementwise-identical copy, no restride/permute computed.
-    if (k == SymKind::Symmetric || (k == SymKind::Hermitian && !numerics::ComplexFloatingPoint<scalar_type>))
+      throw std::out_of_range("Tensor::transpose: axis index out of range (rank "
+          + std::to_string(dims_.size()) + ")");
+
+    // Transposing an axis with itself is always an identity operation. In
+    // particular, it must not conjugate or negate a Hermitian/antisymmetric
+    // tensor merely because that axis carries a group handle.
+    if (i == j)
       return *this;
-    // Hermitian on a complex scalar -> conjugated copy; Antisymmetric -> sign flip.
-    Tensor out(*this);
-    if (k == SymKind::Hermitian)
-      Backend::conjugate(out.buffer());
-    else
-      Backend::scale(out.buffer(), scalar_type(-1));
-    return out;
+
+    const SymGroup& g = dims_[i].symmetry;
+    if (!null_symgroup(g) && dims_[j].symmetry == g) {
+      using Backend = TensorBackend<scalar_type, exec>;
+      const SymKind k = g->kind();
+      if (k == SymKind::Symmetric
+          || (k == SymKind::Hermitian
+              && !numerics::ComplexFloatingPoint<scalar_type>))
+        return *this;
+
+      Tensor out(*this);
+      // A zero-sized Tensor has no buffer to pass to an elementwise backend
+      // operation, but its metadata and empty state still have a valid result.
+      if (!out.allocated())
+        return out;
+      if (k == SymKind::Hermitian)
+        Backend::conjugate(out.buffer());
+      else
+        Backend::scale(out.buffer(), scalar_type(-1));
+      return out;
+    }
+
+    std::vector<size_t> permutation(rank());
+    std::iota(permutation.begin(), permutation.end(), 0);
+    std::swap(permutation[i], permutation[j]);
+    return permute_axes(permutation);
   }
 
   // ----- Printers -----
