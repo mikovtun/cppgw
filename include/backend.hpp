@@ -2,15 +2,178 @@
 #include "common.hpp"
 #include "tensor_buffer.hpp"
 #include "multiprecision.hpp"
+#include "types.hpp"
 #include <concepts>
 #include <complex>
 #include <cstddef>
 #include <algorithm>
+#include <numeric>
 #include <span>
 #include <vector>
 #include <stdexcept>
+#include <limits>
+#include <sstream>
+#include <type_traits>
 
 namespace cppgw {
+
+namespace detail {
+
+// Minimal scalar-operation abstraction used by backend code. These are
+// intentionally unqualified after importing std overloads so ADL can find Boost
+// multiprecision real/complex functions too.
+template <typename T>
+auto numeric_abs(const T& x) {
+  using std::abs;
+  return abs(x);
+}
+
+template <typename T>
+T numeric_conj(const T& x) {
+  if constexpr (numerics::ComplexFloatingPoint<T>) {
+    using std::conj;
+    return conj(x);
+  } else {
+    return x;
+  }
+}
+
+template <typename R>
+R numeric_sqrt(const R& x) {
+  using std::sqrt;
+  return sqrt(x);
+}
+
+// LAPACK details live in src/lapack_solve.cpp. Keep the public header free of
+// Fortran ABI declarations; the template backend calls only these C++ wrappers.
+void lapack_gesv_in_place(TensorBuffer<double, Executor::Host>& coefficient,
+                          size_t n,
+                          TensorBuffer<double, Executor::Host>& rhs,
+                          size_t nrhs);
+void lapack_gesv_in_place(TensorBuffer<std::complex<double>, Executor::Host>& coefficient,
+                          size_t n,
+                          TensorBuffer<std::complex<double>, Executor::Host>& rhs,
+                          size_t nrhs);
+
+template <numerics::FloatingPoint T>
+void qr_solve_in_place(TensorBuffer<T, Executor::Host>& coefficient, size_t n,
+                       TensorBuffer<T, Executor::Host>& rhs, size_t nrhs) {
+  using R = decltype(numeric_abs(T{}));
+  T* a = coefficient.data();
+  T* b = rhs.data();
+
+  R max_col_norm = R(0);
+  for (size_t j = 0; j < n; ++j) {
+    R norm2 = R(0);
+    for (size_t i = 0; i < n; ++i) {
+      const R q = numeric_abs(a[i + n * j]);
+      norm2 += q * q;
+    }
+    const R norm = numeric_sqrt(norm2);
+    if (norm > max_col_norm) max_col_norm = norm;
+  }
+  const R scale = max_col_norm > R(1) ? max_col_norm : R(1);
+  const R tol = R(64) * std::numeric_limits<R>::epsilon()
+              * R(n == 0 ? 1 : n) * scale;
+
+  std::vector<size_t> permutation(n);
+  std::iota(permutation.begin(), permutation.end(), size_t(0));
+
+  // Column-pivoted Householder QR: A P = Q R.  Reflectors are applied
+  // immediately to all remaining columns and RHSs, so only R is retained.
+  for (size_t k = 0; k < n; ++k) {
+    size_t pivot = k;
+    R pivot_norm2 = R(-1);
+    for (size_t j = k; j < n; ++j) {
+      R norm2 = R(0);
+      for (size_t i = k; i < n; ++i) {
+        const R q = numeric_abs(a[i + n * j]);
+        norm2 += q * q;
+      }
+      if (norm2 > pivot_norm2) {
+        pivot_norm2 = norm2;
+        pivot = j;
+      }
+    }
+    const R xnorm = numeric_sqrt(pivot_norm2);
+    if (xnorm <= tol) {
+      std::ostringstream oss;
+      oss << "TensorBackend::solve_in_place QR fallback: numerically singular "
+          << "matrix at rank " << k << " (threshold " << tol << ")";
+      warn_if(1, oss.str());
+      throw std::runtime_error(oss.str());
+    }
+    if (pivot != k) {
+      for (size_t i = 0; i < n; ++i)
+        std::swap(a[i + n * k], a[i + n * pivot]);
+      std::swap(permutation[k], permutation[pivot]);
+    }
+
+    const T x0 = a[k + n * k];
+    const R abs_x0 = numeric_abs(x0);
+    const T phase = abs_x0 == R(0) ? T(1) : x0 / abs_x0;
+    const T alpha = -phase * xnorm;
+    std::vector<T> v(n - k);
+    for (size_t i = k; i < n; ++i)
+      v[i - k] = a[i + n * k];
+    v[0] -= alpha;
+    R vnorm2 = R(0);
+    for (const T& value : v) {
+      const R q = numeric_abs(value);
+      vnorm2 += q * q;
+    }
+    if (vnorm2 <= R(0)) {
+      const std::string msg = "TensorBackend::solve_in_place QR fallback: degenerate Householder reflector";
+      warn_if(1, msg);
+      throw std::runtime_error(msg);
+    }
+    const T beta = T(2) / vnorm2;
+
+    auto apply_reflector = [&](T* column) {
+      T dot{};
+      for (size_t i = 0; i < v.size(); ++i)
+        dot += numeric_conj(v[i]) * column[k + i];
+      const T factor = beta * dot;
+      for (size_t i = 0; i < v.size(); ++i)
+        column[k + i] -= v[i] * factor;
+    };
+    for (size_t j = k; j < n; ++j)
+      apply_reflector(a + n * j);
+    for (size_t j = 0; j < nrhs; ++j)
+      apply_reflector(b + n * j);
+
+    // Make the retained R explicitly triangular; this also prevents harmless
+    // roundoff remnants below the diagonal from confusing later inspection.
+    a[k + n * k] = alpha;
+    for (size_t i = k + 1; i < n; ++i)
+      a[i + n * k] = T{};
+  }
+
+  // Solve R y = Q^H B, then undo A P = Q R: x = P y.
+  for (size_t j = 0; j < nrhs; ++j) {
+    for (size_t kk = n; kk-- > 0;) {
+      T sum = b[kk + n * j];
+      for (size_t l = kk + 1; l < n; ++l)
+        sum -= a[kk + n * l] * b[l + n * j];
+      const R diagonal = numeric_abs(a[kk + n * kk]);
+      if (diagonal <= tol) {
+        std::ostringstream oss;
+        oss << "TensorBackend::solve_in_place QR fallback: numerically singular "
+            << "triangular factor at pivot " << kk;
+        warn_if(1, oss.str());
+        throw std::runtime_error(oss.str());
+      }
+      b[kk + n * j] = sum / a[kk + n * kk];
+    }
+  }
+  std::vector<T> solution(n * nrhs);
+  for (size_t j = 0; j < nrhs; ++j)
+    for (size_t k = 0; k < n; ++k)
+      solution[permutation[k] + n * j] = b[k + n * j];
+  std::copy(solution.begin(), solution.end(), b);
+}
+
+} // namespace detail
 
 // ============================================================================
 //  TensorBackend seam (Story 06, decision Q4)
@@ -18,7 +181,7 @@ namespace cppgw {
 // TensorBackend<TOut, Executor> is the required-operation *contract* a tensor
 // numerical backend must provide:
 //
-//   * linear algebra : gemm
+//   * linear algebra : gemm, solve_in_place (dense A X = B)
 //   * unary ops      : fill, zero, scale, conjugate
 //   * data movement  : permute (dense axis permutation)
 //
@@ -42,10 +205,11 @@ template <typename TOut, typename Executor>
 class TensorBackend;
 
 // The required-op contract. Satisfied iff TensorBackend<T, Executor> provides
-// fill/zero/scale/conjugate, dense axis permutation, and the (mixed-type) gemm
-// on TensorBuffers.
+// fill/zero/scale/conjugate, dense axis permutation, the in-place dense solve,
+// and the (mixed-type) gemm on TensorBuffers.
 template <typename T, typename Executor>
 concept TensorBackendOps =
+  numerics::FloatingPoint<T> &&
   requires(TensorBuffer<T, Executor> A, TensorBuffer<T, Executor> B, TensorBuffer<T, Executor> C) {
     { TensorBackend<T, Executor>::fill(C, T{}) };
     { TensorBackend<T, Executor>::zero(C) };
@@ -55,10 +219,11 @@ concept TensorBackendOps =
         A, std::span<const size_t>{}, std::span<const size_t>{},
         std::span<const size_t>{}, std::span<const size_t>{}, C) };
     { TensorBackend<T, Executor>::template gemm<T, T>(A, (size_t)1, (size_t)1, B, (size_t)1, C) };
+    { TensorBackend<T, Executor>::solve_in_place(A, (size_t)1, B, (size_t)1) };
   };
 
 // ----- Host implementation (hand-written this story; BLAS/Eigen land here later) -----
-template <typename TOut>
+template <numerics::FloatingPoint TOut>
 class TensorBackend<TOut, Executor::Host> {
   using E = Executor::Host;
 public:
@@ -85,6 +250,30 @@ public:
           sum += TOut(a[i + k * M]) * TOut(b[k + j * K]);
         c[i + j * M] = sum;
       }
+  }
+
+  // ----- Dense linear solve -----
+
+  // Overwrite B with X satisfying A X = B.  Both dense buffers use the
+  // Tensor/LAPACK-compatible column-major layout (row fastest).  This raw
+  // backend entry point deliberately knows nothing about Tensor dimensions or
+  // labels; the Tensor frontend validates and batches arbitrary-rank operands.
+  static void solve_in_place(TensorBuffer<TOut, E>& coefficient, size_t n,
+                             TensorBuffer<TOut, E>& rhs, size_t nrhs) {
+    if (n == 0 || nrhs == 0)
+      throw std::invalid_argument("TensorBackend::solve_in_place: n and nrhs must be positive");
+    if (n > std::numeric_limits<size_t>::max() / n
+        || coefficient.size() != n * n)
+      throw std::invalid_argument("TensorBackend::solve_in_place: coefficient buffer has wrong size");
+    if (n > std::numeric_limits<size_t>::max() / nrhs
+        || rhs.size() != n * nrhs)
+      throw std::invalid_argument("TensorBackend::solve_in_place: RHS buffer has wrong size");
+
+    if constexpr (std::same_as<TOut, double> || std::same_as<TOut, std::complex<double>>) {
+      detail::lapack_gesv_in_place(coefficient, n, rhs, nrhs);
+    } else {
+      detail::qr_solve_in_place(coefficient, n, rhs, nrhs);
+    }
   }
 
   // ----- Dense data movement -----
@@ -162,7 +351,7 @@ public:
     if constexpr (numerics::ComplexFloatingPoint<TOut>) {
       TOut* d = T.data();
       for (size_t i = 0; i < T.size(); ++i)
-        d[i] = std::conj(d[i]);
+        d[i] = detail::numeric_conj(d[i]);
     }
   }
 };

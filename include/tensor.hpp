@@ -9,6 +9,7 @@
 #include <memory>
 #include <numeric>
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <optional>
 #include <span>
@@ -562,6 +563,111 @@ public:
 
 // ============================================================================
 //  Mixed-type gemm (Tensor frontend)
+// ----------------------------------------------------------------------------
+// Dense linear solve over explicitly ordered row/column axis pairs.  The
+// coefficient's solve blocks must be [rows..., columns...] at its fastest
+// positions and the RHS begins with [rows...], mirroring gemm's insistence on
+// an unambiguous physical layout.  All remaining A and B axes form a Cartesian
+// product in the output: [columns..., A_free..., B_free...].
+struct SolveAxis {
+  TensorDimLabel row;
+  TensorDimLabel column;
+};
+
+namespace detail {
+inline size_t solve_checked_product(size_t value, size_t factor, const char* what) {
+  if (factor != 0 && value > std::numeric_limits<size_t>::max() / factor)
+    throw std::invalid_argument(std::string("solve: overflow while computing ") + what);
+  return value * factor;
+}
+} // namespace detail
+
+template <numerics::FloatingPoint TA, numerics::FloatingPoint TB,
+          numerics::FloatingPoint TX, typename Exec>
+requires std::same_as<Exec, Executor::Host> &&
+         std::convertible_to<TA, TX> && std::convertible_to<TB, TX>
+void solve(const Tensor<TA, Exec>& A,
+           const Tensor<TB, Exec>& B,
+                 Tensor<TX, Exec>& X,
+           std::span<const SolveAxis> axes) {
+  const size_t p = axes.size();
+  if (p == 0)
+    throw std::invalid_argument("solve: at least one row/column axis pair is required");
+  if (A.rank() < 2 * p)
+    throw std::invalid_argument("solve: coefficient Tensor has too few dimensions for requested axes");
+  if (B.rank() < p)
+    throw std::invalid_argument("solve: RHS Tensor has too few dimensions for requested row axes");
+
+  size_t n = 1;
+  for (size_t i = 0; i < p; ++i) {
+    if (A.dims()[i].label != axes[i].row)
+      throw std::invalid_argument("solve: row axis '" + label_to_string(axes[i].row)
+          + "' must be dimension " + std::to_string(i) + " of coefficient Tensor");
+    if (A.dims()[p + i].label != axes[i].column)
+      throw std::invalid_argument("solve: column axis '" + label_to_string(axes[i].column)
+          + "' must be dimension " + std::to_string(p + i) + " of coefficient Tensor");
+    if (B.dims()[i].label != axes[i].row)
+      throw std::invalid_argument("solve: row axis '" + label_to_string(axes[i].row)
+          + "' must be dimension " + std::to_string(i) + " of RHS Tensor");
+    const size_t row_n = A.dims()[i].dim;
+    if (A.dims()[p + i].dim != row_n || B.dims()[i].dim != row_n)
+      throw std::invalid_argument("solve: size mismatch for row/column axis pair '"
+          + label_to_string(axes[i].row) + "'/'" + label_to_string(axes[i].column) + "'");
+    n = detail::solve_checked_product(n, row_n, "solve dimension");
+  }
+  if (n == 0)
+    throw std::invalid_argument("solve: zero-sized solve dimensions are not supported");
+
+  std::vector<TensorDim> output_dims;
+  output_dims.reserve((A.rank() - p) + (B.rank() - p));
+  for (size_t i = p; i < 2 * p; ++i) output_dims.push_back(A.dims()[i]);
+  for (size_t i = 2 * p; i < A.rank(); ++i) output_dims.push_back(A.dims()[i]);
+  for (size_t i = p; i < B.rank(); ++i) output_dims.push_back(B.dims()[i]);
+  X.prepare_output(std::move(output_dims), "solve");
+
+  size_t a_blocks = 1;
+  for (size_t i = 2 * p; i < A.rank(); ++i)
+    a_blocks = detail::solve_checked_product(a_blocks, A.dims()[i].dim, "coefficient free dimensions");
+  size_t nrhs = 1;
+  for (size_t i = p; i < B.rank(); ++i)
+    nrhs = detail::solve_checked_product(nrhs, B.dims()[i].dim, "RHS free dimensions");
+  if (nrhs == 0)
+    throw std::invalid_argument("solve: zero-sized RHS free dimensions are not supported");
+
+  const size_t matrix_elements = detail::solve_checked_product(n, n, "coefficient matrix size");
+  const size_t rhs_elements = detail::solve_checked_product(n, nrhs, "RHS matrix size");
+  for (size_t a_block = 0; a_block < a_blocks; ++a_block) {
+    TensorBuffer<TX, Executor::Host> coefficient(matrix_elements);
+    TensorBuffer<TX, Executor::Host> rhs(rhs_elements);
+    for (size_t i = 0; i < matrix_elements; ++i)
+      coefficient.data()[i] = static_cast<TX>(A.data()[a_block * matrix_elements + i]);
+    for (size_t i = 0; i < rhs_elements; ++i)
+      rhs.data()[i] = static_cast<TX>(B.data()[i]);
+    try {
+      TensorBackend<TX, Exec>::solve_in_place(coefficient, n, rhs, nrhs);
+    } catch (const std::runtime_error& e) {
+      throw std::runtime_error(std::string("solve: coefficient free block ")
+          + std::to_string(a_block) + " failed: " + e.what());
+    }
+    // X has [columns, A_free, B_free] layout.  The flattened column index is
+    // fastest, followed by the selected coefficient-free block then RHS block.
+    for (size_t b_block = 0; b_block < nrhs; ++b_block)
+      for (size_t column = 0; column < n; ++column)
+        X.data()[column + n * (a_block + a_blocks * b_block)] = rhs.data()[column + n * b_block];
+  }
+}
+
+template <numerics::FloatingPoint TA, numerics::FloatingPoint TB,
+          numerics::FloatingPoint TX, typename Exec>
+requires std::same_as<Exec, Executor::Host> &&
+         std::convertible_to<TA, TX> && std::convertible_to<TB, TX>
+void solve(const Tensor<TA, Exec>& A,
+           const Tensor<TB, Exec>& B,
+                 Tensor<TX, Exec>& X,
+           std::initializer_list<SolveAxis> axes) {
+  solve(A, B, X, std::span<const SolveAxis>(axes.begin(), axes.size()));
+}
+
 // ----------------------------------------------------------------------------
 // Contract the last dimension of X (named labelX) against the first dimension of Y
 // (named labelY), writing the result into Z.

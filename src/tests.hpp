@@ -22,4 +22,8 @@ int run_inverse_fourier_tests();
 // Returns 0 on success; throws std::runtime_error on failure.
 int run_tensor_symmetry_tests();
 
+// Story 06.2: arbitrary-rank Tensor linear solves, LAPACK dispatch, and the
+// generic QR fallback.
+int run_tensor_solve_tests();
+
 } // namespace cppgw

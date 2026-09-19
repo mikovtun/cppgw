@@ -2,6 +2,7 @@
 
 #include <concepts>
 #include "boost/multiprecision/cpp_bin_float.hpp"
+#include "boost/multiprecision/cpp_complex.hpp"
 #include "boost/multiprecision/number.hpp"
 
 namespace cppgw {

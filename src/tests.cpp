@@ -278,6 +278,7 @@ int run_tests() {
 
   // ---- Story 06/06.1: index symmetry, TensorBackend seam, and transpose ---
   run_tensor_symmetry_tests();
+  run_tensor_solve_tests();
 
   return 0;
 }
@@ -324,6 +325,8 @@ int run_tensor_symmetry_tests() {
   // ------------------------------------------------------------------
   static_assert(TensorBackendOps<double, Executor::Host>);
   static_assert(TensorBackendOps<std::complex<double>, Executor::Host>);
+  static_assert(TensorBackendOps<boost::multiprecision::cpp_complex_50, Executor::Host>);
+  static_assert(!TensorBackendOps<int, Executor::Host>);
 
   // ------------------------------------------------------------------
   //  1. Construction & invariants
@@ -802,6 +805,267 @@ int run_tensor_symmetry_tests() {
     if (eri3.rank() != 3 || eri3.label_indices("ao").size() != 2
         || eri3.dims()[1].symmetry->kind() != SymKind::Symmetric)
       throw std::runtime_error("symmetry tests: GF2 eri3 shape/symmetry wrong");
+  }
+
+  return 0;
+}
+
+int run_tensor_solve_tests() {
+  using Host = Executor::Host;
+  using T = Tensor<double, Host>;
+  const SolveAxis axis{TensorDimLabel("row"), TensorDimLabel("col")};
+
+  // LAPACK path, two RHS columns: A X = B with row-fast/column-major storage.
+  {
+    T A({{"row", 2}, {"col", 2}});
+    T B({{"row", 2}, {"rhs", 2}});
+    A(0, 0) = 2.0; A(1, 0) = 1.0;
+    A(0, 1) = 1.0; A(1, 1) = 3.0;
+    B(0, 0) = 1.0; B(1, 0) = 2.0;
+    B(0, 1) = 3.0; B(1, 1) = 4.0;
+    const T A0 = A, B0 = B;
+    T X;
+    solve(A, B, X, {axis});
+    for (size_t j = 0; j < 2; ++j)
+      for (size_t i = 0; i < 2; ++i) {
+        double value = 0.0;
+        for (size_t k = 0; k < 2; ++k) value += A0(i, k) * X(k, j);
+        if (std::abs(value - B0(i, j)) > 1e-12)
+          throw std::runtime_error("solve tests: double LAPACK residual is wrong");
+      }
+    if (A(0, 0) != A0(0, 0) || B(1, 1) != B0(1, 1))
+      throw std::runtime_error("solve tests: public solve modified its inputs");
+  }
+
+  // The complex-double path is LAPACK zgesv (not the generic QR fallback).
+  {
+    using C = std::complex<double>;
+    Tensor<C, Host> A({{"row", 2}, {"col", 2}});
+    Tensor<C, Host> B({{"row", 2}, {"rhs", 1}}), X;
+    A(0, 0) = C(2, 1); A(1, 0) = C(1, -1);
+    A(0, 1) = C(0, 1); A(1, 1) = C(3, 0);
+    B(0, 0) = C(1, 2); B(1, 0) = C(4, -1);
+    const auto A0 = A, B0 = B;
+    solve(A, B, X, {axis});
+    for (size_t i = 0; i < 2; ++i) {
+      C value{};
+      for (size_t k = 0; k < 2; ++k) value += A0(i, k) * X(k, 0);
+      if (std::abs(value - B0(i, 0)) > 1e-12)
+        throw std::runtime_error("solve tests: complex LAPACK residual is wrong");
+    }
+  }
+
+  // Multi-axis solve space: verifies fastest-to-slowest flattening order.
+  {
+    T A({{"row_spin", 2}, {"row_ao", 2}, {"col_spin", 2}, {"col_ao", 2}});
+    T B({{"row_spin", 2}, {"row_ao", 2}, {"rhs", 2}});
+    for (size_t rs = 0; rs < 2; ++rs)
+      for (size_t ra = 0; ra < 2; ++ra) {
+        const size_t flat = rs + 2 * ra;
+        for (size_t cs = 0; cs < 2; ++cs)
+          for (size_t ca = 0; ca < 2; ++ca)
+            A(rs, ra, cs, ca) = (flat == cs + 2 * ca) ? 10.0 + flat : 0.0;
+        B(rs, ra, 0) = 100.0 + flat;
+        B(rs, ra, 1) = 200.0 + flat;
+      }
+    T X;
+    solve(A, B, X, {SolveAxis{"row_spin", "col_spin"}, SolveAxis{"row_ao", "col_ao"}});
+    if (X.rank() != 3 || X.dims()[0].label != TensorDimLabel("col_spin")
+        || X.dims()[1].label != TensorDimLabel("col_ao")
+        || X.dims()[2].label != TensorDimLabel("rhs"))
+      throw std::runtime_error("solve tests: multi-axis output shape is wrong");
+    for (size_t cs = 0; cs < 2; ++cs)
+      for (size_t ca = 0; ca < 2; ++ca)
+        for (size_t r = 0; r < 2; ++r) {
+          const size_t flat = cs + 2 * ca;
+          const double expected = (r == 0 ? 100.0 + flat : 200.0 + flat) / (10.0 + flat);
+          if (std::abs(X(cs, ca, r) - expected) > 1e-12)
+            throw std::runtime_error("solve tests: multi-axis flattening is wrong");
+        }
+  }
+
+  // Coefficient free dimensions broadcast across all RHS free dimensions.
+  {
+    T A({{"row", 2}, {"col", 2}, {"a", 2}});
+    T B({{"row", 2}, {"b0", 2}, {"b1", 3}});
+    for (size_t a = 0; a < 2; ++a) {
+      A(0, 0, a) = 2.0 + a; A(1, 0, a) = 0.0;
+      A(0, 1, a) = 0.0;     A(1, 1, a) = 4.0 + a;
+    }
+    for (size_t b1 = 0; b1 < 3; ++b1)
+      for (size_t b0 = 0; b0 < 2; ++b0) {
+        B(0, b0, b1) = 2.0 + b0 + 10.0 * b1;
+        B(1, b0, b1) = 8.0 + b0 + 10.0 * b1;
+      }
+    T X;
+    solve(A, B, X, {axis});
+    if (X.rank() != 4 || X.dims()[0].label != TensorDimLabel("col")
+        || X.dims()[1].label != TensorDimLabel("a")
+        || X.dims()[2].label != TensorDimLabel("b0")
+        || X.dims()[3].label != TensorDimLabel("b1"))
+      throw std::runtime_error("solve tests: broadcast output shape is wrong");
+    for (size_t b1 = 0; b1 < 3; ++b1)
+      for (size_t b0 = 0; b0 < 2; ++b0)
+        for (size_t a = 0; a < 2; ++a) {
+          if (std::abs(X(0, a, b0, b1) - B(0, b0, b1) / (2.0 + a)) > 1e-12
+              || std::abs(X(1, a, b0, b1) - B(1, b0, b1) / (4.0 + a)) > 1e-12)
+            throw std::runtime_error("solve tests: free-dimension broadcast is wrong");
+        }
+  }
+
+  // Non-LAPACK scalars exercise the generic column-pivoted QR fallback.
+  {
+    using MP = numerics::float50;
+    Tensor<MP, Host> A({{"row", 2}, {"col", 2}});
+    Tensor<MP, Host> B({{"row", 2}, {"rhs", 1}});
+    A(0, 0) = MP(2); A(1, 0) = MP(1);
+    A(0, 1) = MP(1); A(1, 1) = MP(3);
+    B(0, 0) = MP(1); B(1, 0) = MP(2);
+    Tensor<MP, Host> X;
+    solve(A, B, X, {axis});
+    const MP r0 = MP(2) * X(0, 0) + X(1, 0) - MP(1);
+    const MP r1 = X(0, 0) + MP(3) * X(1, 0) - MP(2);
+    if (abs(r0) > MP("1e-40") || abs(r1) > MP("1e-40"))
+      throw std::runtime_error("solve tests: multiprecision QR residual is wrong");
+  }
+  {
+    Tensor<float, Host> A({{"row", 2}, {"col", 2}}), B({{"row", 2}, {"rhs", 1}}), X;
+    A(0, 0) = 2.0f; A(1, 0) = 1.0f; A(0, 1) = 1.0f; A(1, 1) = 3.0f;
+    B(0, 0) = 1.0f; B(1, 0) = 2.0f;
+    solve(A, B, X, {axis});
+    if (std::abs(2.0f * X(0, 0) + X(1, 0) - 1.0f) > 1e-5f
+        || std::abs(X(0, 0) + 3.0f * X(1, 0) - 2.0f) > 1e-5f)
+      throw std::runtime_error("solve tests: float QR residual is wrong");
+  }
+  {
+    using C = std::complex<long double>;
+    Tensor<C, Host> A({{"row", 2}, {"col", 2}}), B({{"row", 2}, {"rhs", 1}}), X;
+    A(0, 0) = C(1, 2); A(1, 0) = C(3, -1);
+    A(0, 1) = C(2, -3); A(1, 1) = C(4, 1);
+    B(0, 0) = C(5, 1); B(1, 0) = C(-2, 3);
+    const auto A0 = A, B0 = B;
+    solve(A, B, X, {axis});
+    for (size_t i = 0; i < 2; ++i) {
+      C value{};
+      for (size_t k = 0; k < 2; ++k) value += A0(i, k) * X(k, 0);
+      if (std::abs(value - B0(i, 0)) > 1e-15L)
+        throw std::runtime_error("solve tests: complex long double QR residual is wrong");
+    }
+  }
+
+  // Singular systems warn at verbosity level 1 and fail rather than returning
+  // a fabricated solution.  Restore the process-wide warning setting afterward.
+  {
+    T A({{"row", 2}, {"col", 2}}), B({{"row", 2}, {"rhs", 1}}), X;
+    A(0, 0) = 1.0; A(1, 0) = 2.0;
+    A(0, 1) = 2.0; A(1, 1) = 4.0;
+    B(0, 0) = 1.0; B(1, 0) = 2.0;
+    const int old_verbosity = verbosity();
+    set_verbosity(1);
+    const bool threw = throws_as<std::runtime_error>([&] { solve(A, B, X, {axis}); });
+    set_verbosity(old_verbosity);
+    if (!threw)
+      throw std::runtime_error("solve tests: singular LAPACK solve should throw");
+  }
+
+  // Boost complex multiprecision is also classified as FloatingPoint and uses
+  // the ADL-based conjugate/magnitude QR path.
+  {
+    using R = boost::multiprecision::cpp_bin_float_50;
+    using C = boost::multiprecision::cpp_complex_50;
+    const auto real = [](int x) { return C(R(x), R(0)); };
+    Tensor<C, Host> A({{"row", 2}, {"col", 2}});
+    Tensor<C, Host> B({{"row", 2}, {"rhs", 1}}), X;
+    A(0, 0) = real(2); A(1, 0) = real(1);
+    A(0, 1) = real(1); A(1, 1) = real(3);
+    B(0, 0) = real(1); B(1, 0) = real(2);
+    solve(A, B, X, {axis});
+    using boost::multiprecision::abs;
+    if (abs(real(2) * X(0, 0) + X(1, 0) - real(1)) > R("1e-40")
+        || abs(X(0, 0) + real(3) * X(1, 0) - real(2)) > R("1e-40"))
+      throw std::runtime_error("solve tests: boost complex QR residual is wrong");
+  }
+
+  // QR-path singularity also warns and throws.
+  {
+    Tensor<float, Host> A({{"row", 2}, {"col", 2}}), B({{"row", 2}, {"rhs", 1}}), X;
+    A(0, 0) = 1.0f; A(1, 0) = 2.0f;
+    A(0, 1) = 2.0f; A(1, 1) = 4.0f;
+    B(0, 0) = 1.0f; B(1, 0) = 2.0f;
+    const int old_verbosity = verbosity();
+    set_verbosity(1);
+    const bool threw = throws_as<std::runtime_error>([&] { solve(A, B, X, {axis}); });
+    set_verbosity(old_verbosity);
+    if (!threw)
+      throw std::runtime_error("solve tests: singular QR solve should throw");
+  }
+
+  // Boost complex backend conjugation uses the same ADL-compatible abstraction.
+  {
+    using C = boost::multiprecision::cpp_complex_50;
+    Tensor<C, Host> Z({{"z", 1}});
+    Z(0) = C(1, 2);
+    TensorBackend<C, Host>::conjugate(Z.buffer());
+  }
+
+  // Axis positions and validation are contractual, like gemm's contracted-axis positions.
+  {
+    T A({{"col", 2}, {"row", 2}}), B({{"row", 2}, {"rhs", 1}}), X;
+    if (!throws_ia([&] { solve(A, B, X, {axis}); }))
+      throw std::runtime_error("solve tests: wrong coefficient axis ordering should throw");
+    if (!throws_ia([&] { solve(A, B, X, {}); }))
+      throw std::runtime_error("solve tests: empty axes should throw");
+  }
+  {
+    T A({{"row", 2}}), B({{"row", 2}}), X;
+    if (!throws_ia([&] { solve(A, B, X, {axis}); }))
+      throw std::runtime_error("solve tests: insufficient coefficient rank should throw");
+  }
+  {
+    T A({{"row", 2}, {"col", 3}}), B({{"row", 2}}), X;
+    if (!throws_ia([&] { solve(A, B, X, {axis}); }))
+      throw std::runtime_error("solve tests: unequal row/column extents should throw");
+  }
+  {
+    T A({{"row", 2}, {"col", 2}}), B({{"row", 3}}), X;
+    if (!throws_ia([&] { solve(A, B, X, {axis}); }))
+      throw std::runtime_error("solve tests: unequal RHS row extent should throw");
+  }
+  {
+    T Awrong({{"col", 2}, {"row", 2}}), B({{"row", 2}}), X;
+    Awrong(0, 0) = 2.0; Awrong(1, 0) = 1.0;
+    Awrong(0, 1) = 1.0; Awrong(1, 1) = 3.0;
+    B(0) = 1.0; B(1) = 2.0;
+    if (!throws_ia([&] { solve(Awrong, B, X, {axis}); }))
+      throw std::runtime_error("solve tests: valid but unpermuted input should throw");
+    auto A = Awrong.permute_axes({1, 0});
+    solve(A, B, X, {axis});
+    if (std::abs(2.0 * X(0) + X(1) - 1.0) > 1e-12
+        || std::abs(X(0) + 3.0 * X(1) - 2.0) > 1e-12)
+      throw std::runtime_error("solve tests: explicit permute before solve failed");
+  }
+  {
+    T A({{"row", 2}, {"col", 2}}), B({{"row", 2}}), X({{"wrong", 2}});
+    A(0, 0) = 2.0; A(1, 0) = 1.0; A(0, 1) = 1.0; A(1, 1) = 3.0;
+    B(0) = 1.0; B(1) = 2.0;
+    if (!throws_ia([&] { solve(A, B, X, {axis}); }))
+      throw std::runtime_error("solve tests: incompatible preallocated output should throw");
+  }
+  {
+    T A({{"row", 2}, {"dup", 2}}), B({{"row", 2}, {"dup", 1}}), X;
+    if (!throws_ia([&] { solve(A, B, X, {SolveAxis{"row", "dup"}}); }))
+      throw std::runtime_error("solve tests: duplicate output labels should throw");
+  }
+  {
+    const SymGroup g = Symmetric();
+    std::vector<TensorDim> adims{TensorDim{"ao", 2, g}, TensorDim{"ao", 2, g}};
+    T A(adims), B({{"ao", 2}}), X;
+    A(0, 0) = 2.0; A(1, 0) = 1.0; A(0, 1) = 1.0; A(1, 1) = 3.0;
+    B(0) = 1.0; B(1) = 2.0;
+    solve(A, B, X, {SolveAxis{"ao", "ao"}});
+    if (std::abs(2.0 * X(0) + X(1) - 1.0) > 1e-12
+        || std::abs(X(0) + 3.0 * X(1) - 2.0) > 1e-12)
+      throw std::runtime_error("solve tests: duplicate-label positional solve failed");
   }
 
   return 0;
