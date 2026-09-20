@@ -67,8 +67,9 @@ should be a valid input file (with a `CALCULATION` line added, see below).
   per-calculation requirement are defined in **one place**, so adding a new parameter (or changing a default)
   is a single, local edit rather than a hunt across the codebase.
 - **Tensor dimensions are labelled by physical meaning** (the point of the Tensor labelling system).
-  See the Dimension labels section. (The *active* transpose for non-identical axes is a future story;
-  Story 06 already provides the no-op symmetry transpose `T.transpose(i,j)` for symmetry-bound pairs.)
+  See the Dimension labels section. (Story 06 provides the no-op symmetry transpose
+  `T.transpose(i,j)` for symmetry-bound pairs; Story 06.1 provides `permute_axes` / pairwise
+  `transpose` for non-identical axes, which this story does not use during loading.)
 - **Both AO axes of `hcore`/`eri3` share the label `ao`, bound by ONE shared `SymmetryGroup`** (Story 06
   label rule 2: a repeated label is legal iff every occurrence is bound to the same non-null group). The
   interchangeable axes are physically identical, so one label names the family; `label_index("ao")` is a
@@ -380,7 +381,7 @@ auto hcore_g = Hermitian();   // one shared group object for hcore's AO pair
 auto eri3_g  = Symmetric();   // one shared group object for eri3's AO pair
 
 Tensor<double, Executor::Host> hcore   ( { TensorDim{"ao", N_AO, hcore_g}, TensorDim{"ao", N_AO, hcore_g} });
-Tensor<double, Executor::Host> mo_coeff( { TensorDim{"ao", N_AO},          TensorDim{"mo", N_MO} });
+Tensor<double, Executor::Host> mo_coeff( { TensorDim{"mo", N_MO},          TensorDim{"ao", N_AO} });
 Tensor<double, Executor::Host> eri3    ( { TensorDim{"ao", N_AO, eri3_g},  TensorDim{"ao", N_AO, eri3_g}, TensorDim{"ri", N_RI} });
 ```
 
@@ -471,15 +472,16 @@ For each test, create a temp HDF5 file at a known path with HighFive, write data
 - **Happy load:** write `hcore`(3×3),`mo_coeff`(3×3),`eri3`(5×3×3) float64 datasets with a deterministic
   fill (e.g. linear ramp); construct an `InputCatalog` pointing at them (`ERI3/HCORE/MO_COEFF`); call
   `catalog.require_gf2()`; assert
-  - `hcore` rank 2, dims `{ao=3, ao=3}`, `mo_coeff` rank 2 dims `{ao=3, mo=3}`, `eri3` rank 3 dims
-    `{ao=3, ao=3, ri=5}`;
+  - `hcore` rank 2, dims `{ao=3, ao=3}`, `mo_coeff` rank 2 dims `{mo=3, ao=3}` (H5 `(ao, mo)`:
+    `mo` is the fast axis), `eri3` rank 3 dims `{ao=3, ao=3, ri=5}`;
   - **declared symmetries:** `hcore.dims()[0].symmetry` and `hcore.dims()[1].symmetry` are `same_symgroup`
     with `kind() == Hermitian`; `eri3`'s two `ao` axes (positions 0 and 1) are `same_symgroup` with
     `kind() == Symmetric`; `mo_coeff`'s axes (and `eri3`'s `ri` axis) carry a null `SymGroup`
     (`null_symgroup`);
   - **symmetry behaviour on the loaded tensors:** `hcore.transpose(0,1)` equals `hcore` (Hermitian on a
     real scalar is the identity no-op); `eri3.transpose(0,1)` equals `eri3` (Symmetric no-op);
-    `mo_coeff.transpose(0,1)` throws `std::logic_error` (unbound pair — not yet implemented);
+    the plain (unbound) `mo_coeff` axes, if asked for, would be physically permuted by `transpose`
+    (Story 06.1) rather than treated as a symmetry no-op — this story does not rely on that.
   - every stored element equals the written value (full-array sweep, max|err| == 0.0, since it is a copy);
   - `eta` round-trips from the input.
 - **AO-size consistency:** write `hcore` as 3×3 but `mo_coeff` as 4×3 (N_AO mismatch) → `catalog.require_gf2()` throws
@@ -493,7 +495,7 @@ Create a real input file (e.g. `build/test.in` updated, or a new `gf2.in`) and v
 "finished when …" phrasing:
 
 - `./cppgw -i gf2.in -d rhf_df.h5` → runs the GF2 stub successfully, prints a summary (loaded tensor
-  shapes/labels/symmetries: `hcore{ao=24[hermitian] ×2}`, `mo_coeff{ao=24, mo=24}` (plain),
+  shapes/labels/symmetries: `hcore{ao=24[hermitian] ×2}`, `mo_coeff{mo=24, ao=24}` (plain),
   `eri3{ao=24[symmetric] ×2, ri=116}`, `eta=…`), exits 0.
 - `./cppgw gf2.in rhf_df.h5` → identical (positional form).
 - `./cppgw -i badkw.in -d rhf_df.h5` (a file with an unknown keyword such as `HERI3 = eri3`) → prints a

@@ -26,4 +26,10 @@ int run_tensor_symmetry_tests();
 // generic QR fallback.
 int run_tensor_solve_tests();
 
+// Story 05: InputCatalog framework -- keyword registry, input-file parser,
+// defaults/provenance/sanitization, and semantic GF2 dataset loading (labels +
+// advisory symmetries + float64 validation).
+// Returns 0 on success; throws std::runtime_error on failure.
+int run_input_data_loading_tests();
+
 } // namespace cppgw

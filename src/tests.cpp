@@ -1,5 +1,12 @@
 #include "main.hpp"
 #include "tests.hpp"
+#include "input.hpp"
+
+#include <highfive/highfive.hpp>
+
+#include <filesystem>
+#include <cmath>
+#include <cstdio>
 
 using namespace cppgw;
 
@@ -279,6 +286,9 @@ int run_tests() {
   // ---- Story 06/06.1: index symmetry, TensorBackend seam, and transpose ---
   run_tensor_symmetry_tests();
   run_tensor_solve_tests();
+
+  // ---- Story 05: InputCatalog, input parsing, and semantic GF2 loading ----
+  run_input_data_loading_tests();
 
   return 0;
 }
@@ -1067,6 +1077,378 @@ int run_tensor_solve_tests() {
         || std::abs(X(0) + 3.0 * X(1) - 2.0) > 1e-12)
       throw std::runtime_error("solve tests: duplicate-label positional solve failed");
   }
+
+  return 0;
+}
+
+// ============================================================================
+//  Story 05 -- InputCatalog input framework, parser, and semantic GF2 load
+// ============================================================================
+
+int run_input_data_loading_tests() {
+  using Host = Executor::Host;
+
+  // Helper: true iff f() throws std::invalid_argument whose message contains
+  // every listed needle (and nothing else is checked).
+  auto throws_ia_with = [](auto&& f, const std::vector<std::string>& needles) {
+    try { f(); }
+    catch (const std::invalid_argument& e) {
+      const std::string msg = e.what();
+      for (const std::string& n : needles)
+        if (msg.find(n) == std::string::npos)
+          return false;
+      return true;
+    }
+    catch (...) { return false; }
+    return false;
+  };
+
+  const auto text_with = [](const std::string& extra) {
+    return std::string("CALCULATION = GF2\n")
+         + "HCORE = paths/hcore\n"
+         + "MO_COEFF = paths/mo_coeff\n"
+         + "ERI3 = paths/eri3\n"
+         + extra;
+  };
+
+  // ------------------------------------------------------------------
+  //  A. Parser / registry / sanitization (pure, no files)
+  // ------------------------------------------------------------------
+  // A1. Happy path: required values, comments, blank lines, case-insensitive
+  //     keyword lookup, path value preserved byte-for-byte.
+  {
+    const std::string text =
+      "# header comment\n"
+      "// another comment\n\n"
+      "cAlCuLaTiOn = GF2\n"
+      "hcore  =  paths/hcore\n"
+      "Mo_Coeff=paths/mo_coeff\n"
+      "ERI3 = My/Path/eri3\n"
+      "eta   =  1e-5\n";
+    const ResolvedInput r = parse_input(text);
+    if (r.calc != Calc::Gf2)
+      throw std::runtime_error("input tests: happy-path calculation is not GF2");
+    if (r.get_string("HCORE") != "paths/hcore")
+      throw std::runtime_error("input tests: HCORE path value is wrong");
+    if (r.get_string("MO_COEFF") != "paths/mo_coeff")
+      throw std::runtime_error("input tests: MO_COEFF path value is wrong");
+    if (r.get_string("ERI3") != "My/Path/eri3")
+      throw std::runtime_error("input tests: ERI3 path case was not preserved exactly");
+    if (r.get_double("ETA") != 1e-5)
+      throw std::runtime_error("input tests: ETA value is wrong");
+    if (!r.supplied("ETA"))
+      throw std::runtime_error("input tests: user-supplied ETA is not reported as supplied");
+    if (r.supplied("HCORE") != true)
+      throw std::runtime_error("input tests: HCORE is not reported as supplied");
+  }
+
+  // A2. Keywords are case-insensitive; values are case-sensitive.
+  {
+    const std::string text =
+      "CALCULATION = gf2\n"
+      "HCORE = hcore\nMO_COEFF = mo\n"
+      "ErI3 = My/Path/eri3\n";
+    const ResolvedInput r = parse_input(text);
+    if (r.get_string("ERI3") != "My/Path/eri3")
+      throw std::runtime_error("input tests: keyword case-folding broke the ERI3 value");
+  }
+  {
+    const std::string text =
+      "calculation = Gf2\n"
+      "HCORE = hcore\nMO_COEFF = mo\nERI3 = eri3\n";
+    const ResolvedInput r = parse_input(text);
+    if (r.calc != Calc::Gf2)
+      throw std::runtime_error("input tests: calc case-folding is wrong");
+  }
+
+  // A3. Double forms: ordinary and Fortran-D exponents, full token only.
+  {
+    for (const std::string tok : {"1e-5", "1E-5", "1D-5", "1d-5", "0.00001", "1.0E-5", "+0.00001", "0.01e-3"}) {
+      const ResolvedInput r = parse_input(
+          "CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\neta = " + tok + "\n");
+      if (r.get_double("ETA") != 1e-5) {
+        std::ostringstream oss;
+        oss << "input tests: double token '" << tok << "' did not parse to 1e-5";
+        throw std::runtime_error(oss.str());
+      }
+    }
+  }
+
+  // A4. ETA default + provenance.
+  {
+    const ResolvedInput defaulted = parse_input(text_with(""));
+    if (defaulted.get_double("ETA") != 1e-5)
+      throw std::runtime_error("input tests: ETA default is not 1e-5");
+    if (defaulted.supplied("ETA"))
+      throw std::runtime_error("input tests: defaulted ETA is reported as supplied");
+
+    const ResolvedInput supplied = parse_input(text_with("eta = 2.5e-4\n"));
+    if (supplied.get_double("ETA") != 2.5e-4 || !supplied.supplied("ETA"))
+      throw std::runtime_error("input tests: user ETA value/provenance is wrong");
+  }
+
+  // A5. Unknown keywords are a hard error, naming the keyword.
+  {
+    if (!throws_ia_with([&] { parse_input(text_with("HERI3 = x\n")); }, {"HERI3"}))
+      throw std::runtime_error("input tests: unknown keyword HERI3 should be rejected");
+    if (!throws_ia_with(
+        [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\nBOGUS = 1\n"); },
+        {"BOGUS"}))
+      throw std::runtime_error("input tests: unknown keyword BOGUS should be rejected");
+  }
+
+  // A6. CALCULATION selection rules.
+  {
+    // Missing CALCULATION -> hard error.
+    if (!throws_ia_with(
+        [&] { parse_input("HCORE = h\nMO_COEFF = m\nERI3 = e\n"); },
+        {"CALCULATION"}))
+      throw std::runtime_error("input tests: missing CALCULATION should be rejected");
+    // Unknown calculation name -> hard error, naming the value.
+    if (!throws_ia_with(
+        [&] { parse_input("CALCULATION = GWR\n"); },
+        {"GWR"}))
+      throw std::runtime_error("input tests: unknown calculation name should be rejected");
+  }
+
+  // A7. Missing REQUIRED GF2 keywords are reported together.
+  {
+    if (!throws_ia_with(
+        [&] { parse_input("CALCULATION = GF2\nMO_COEFF = mo\n"); },
+        {"HCORE", "ERI3"}))
+      throw std::runtime_error("input tests: missing required HCORE/ERI3 must be reported in one error");
+  }
+
+  // A8. Malformed lines.
+  {
+    if (!throws_ia_with(
+        [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\njust some words\n"); },
+        {}))
+      throw std::runtime_error("input tests: a line without '=' should be rejected");
+    if (!throws_ia_with(
+        [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\n= value\n"); },
+        {}))
+      throw std::runtime_error("input tests: an empty keyword should be rejected");
+  }
+
+  // A9. Bad double values: partial tokens, non-numerics, non-finite.
+  {
+    for (const std::string bad : {"foo", "1e-5x", "5!", "inf", "infinity", "nan"}) {
+      if (!throws_ia_with(
+          [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\neta = " + bad + "\n"); },
+          {"ETA"})) {
+        std::ostringstream oss;
+        oss << "input tests: bad double token '" << bad << "' should be rejected";
+        throw std::runtime_error(oss.str());
+      }
+    }
+  }
+
+  // A10. Sanitization: ETA must be strictly positive.
+  {
+    if (!throws_ia_with(
+        [&] { parse_input(text_with("eta = -1e-5\n")); },
+        {"ETA"}))
+      throw std::runtime_error("input tests: negative ETA should be rejected");
+    if (!throws_ia_with(
+        [&] { parse_input(text_with("eta = 0\n")); },
+        {"ETA"}))
+      throw std::runtime_error("input tests: zero ETA should be rejected");
+  }
+
+  // A11. Duplicate keyword -> hard error naming both lines' keyword.
+  {
+    if (!throws_ia_with(
+        [&] { parse_input(text_with("eta = 1e-5\neta = 2e-5\n")); },
+        {"ETA"}))
+      throw std::runtime_error("input tests: duplicate ETA (last-wins) should be rejected");
+  }
+  {
+    // Duplicated dataset paths are equally ambiguous.
+    if (!throws_ia_with(
+        [&] { parse_input(text_with("HCORE = h2\n")); },
+        {"HCORE"}))
+      throw std::runtime_error("input tests: duplicate HCORE (last-wins) should be rejected");
+  }
+
+  // ------------------------------------------------------------------
+  //  B. GF2 semantic data loading (self-contained HDF5 via HighFive)
+  // ------------------------------------------------------------------
+  {
+    // A small, deterministic, nontrivial fixture.
+    const std::string h5 = (std::filesystem::temp_directory_path() / "cppgw_story05_test.h5").string();
+    std::remove(h5.c_str());
+
+    const size_t N_AO = 24, N_MO = 12, N_RI = 30;
+    {
+      HighFive::File f(h5, HighFive::File::Truncate);
+      auto fill = [](std::vector<double>& v, double base) {
+        for (size_t i = 0; i < v.size(); ++i) v[i] = base + (double)i;
+      };
+      std::vector<double> hcore(N_AO * N_AO);    fill(hcore, 1.0);
+      std::vector<double> mo    (N_AO * N_MO);   fill(mo,    100.0);
+      std::vector<double> eri3  (N_RI * N_AO * N_AO); fill(eri3, 1000.0);
+      std::vector<double> wide  (N_AO * 2);      fill(wide,  10000.0);   // deliberately non-square
+      std::vector<double> aomis (2 * 2);         fill(aomis, 20000.0);   // AO extent != N_AO
+      f.createDataSet<double>("hcore",    HighFive::DataSpace(std::vector<size_t>{N_AO, N_AO})).write_raw(hcore.data());
+      f.createDataSet<double>("mo_coeff", HighFive::DataSpace(std::vector<size_t>{N_AO, N_MO})).write_raw(mo.data());
+      f.createDataSet<double>("eri3",     HighFive::DataSpace(std::vector<size_t>{N_RI, N_AO, N_AO})).write_raw(eri3.data());
+      f.createDataSet<double>("wide",     HighFive::DataSpace(std::vector<size_t>{N_AO, 2})).write_raw(wide.data());
+      f.createDataSet<double>("ao_mis",   HighFive::DataSpace(std::vector<size_t>{2, 2})).write_raw(aomis.data());
+    }
+
+    // B1. Happy load: dims, labels, declared symmetries, and an exact copy.
+    {
+      const InputCatalog cat = InputCatalog::from_text(
+          "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = mo_coeff\nERI3 = eri3\neta = 1e-5\n",
+          h5);
+      Gf2Input g = cat.require_gf2();
+
+      // hcore: 2x2, both axes 'ao', ONE shared Hermitian SymGroup.
+      if (g.hcore.rank() != 2)
+        throw std::runtime_error("input tests: hcore has wrong rank");
+      if (g.hcore.dims()[0].label != TensorDimLabel("ao")
+          || g.hcore.dims()[1].label != TensorDimLabel("ao"))
+        throw std::runtime_error("input tests: hcore axes are not labelled 'ao'");
+      if (g.hcore.dims()[0].dim != N_AO || g.hcore.dims()[1].dim != N_AO)
+        throw std::runtime_error("input tests: hcore has wrong dimensions");
+      if (!g.hcore.dims()[0].symmetry || g.hcore.dims()[0].symmetry != g.hcore.dims()[1].symmetry)
+        throw std::runtime_error("input tests: hcore AO axes are not bound to ONE shared SymGroup");
+      if (g.hcore.dims()[0].symmetry->kind() != SymKind::Hermitian)
+        throw std::runtime_error("input tests: hcore AO pair should be a Hermitian family");
+
+      // mo_coeff: 2 dims { mo (fastest), ao }, plain axes, no SymGroups
+      // (H5 shape (ao, mo): mo is the inner/fast axis).
+      if (g.mo_coeff.rank() != 2)
+        throw std::runtime_error("input tests: mo_coeff has wrong rank");
+      if (g.mo_coeff.dims()[0].label != TensorDimLabel("mo")
+          || g.mo_coeff.dims()[1].label != TensorDimLabel("ao"))
+        throw std::runtime_error("input tests: mo_coeff axes are not labelled mo(fast)/ao");
+      if (g.mo_coeff.dims()[0].dim != N_MO || g.mo_coeff.dims()[1].dim != N_AO)
+        throw std::runtime_error("input tests: mo_coeff has wrong dimensions");
+      if (g.mo_coeff.dims()[0].symmetry || g.mo_coeff.dims()[1].symmetry)
+        throw std::runtime_error("input tests: mo_coeff must be plain (no SymGroups)");
+
+      // eri3: 3x3, both AO axes 'ao' under ONE shared Symmetric SymGroup; 'ri' plain.
+      if (g.eri3.rank() != 3)
+        throw std::runtime_error("input tests: eri3 has wrong rank");
+      if (g.eri3.dims()[0].label != TensorDimLabel("ao")
+          || g.eri3.dims()[1].label != TensorDimLabel("ao")
+          || g.eri3.dims()[2].label != TensorDimLabel("ri"))
+        throw std::runtime_error("input tests: eri3 axes are not labelled ao/ao/ri");
+      if (g.eri3.dims()[0].dim != N_AO || g.eri3.dims()[1].dim != N_AO || g.eri3.dims()[2].dim != N_RI)
+        throw std::runtime_error("input tests: eri3 has wrong dimensions");
+      if (!g.eri3.dims()[0].symmetry || g.eri3.dims()[0].symmetry != g.eri3.dims()[1].symmetry)
+        throw std::runtime_error("input tests: eri3 AO axes are not bound to ONE shared SymGroup");
+      if (g.eri3.dims()[0].symmetry->kind() != SymKind::Symmetric)
+        throw std::runtime_error("input tests: eri3 AO pair should be a Symmetric family");
+      if (g.eri3.dims()[2].symmetry)
+        throw std::runtime_error("input tests: eri3 ri axis must be plain");
+
+      // Symmetry is advisory: transposing a bound pair on a real scalar is a
+      // no-op (Story 06), so the SAME coordinate of the result must match.
+      {
+        if (g.hcore.transpose(0, 1)(2, 1) != g.hcore(2, 1))
+          throw std::runtime_error("input tests: Hermitian (real) transpose must be a no-op");
+        if (g.eri3.transpose(0, 1)(2, 1, 3) != g.eri3(2, 1, 3))
+          throw std::runtime_error("input tests: Symmetric (real) transpose must be a no-op");
+      }
+
+      // Data was copied exactly from the file (no reinterpretation).
+      {
+        const double* h = g.hcore.data();
+        const double* m = g.mo_coeff.data();
+        const double* e = g.eri3.data();
+        for (size_t j = 0; j < N_AO; ++j)
+          for (size_t i = 0; i < N_AO; ++i)
+            if (h[i + j * N_AO] != 1.0 + i + j * N_AO)
+              throw std::runtime_error("input tests: hcore element mismatch");
+        for (size_t a = 0; a < N_AO; ++a)
+          for (size_t mm = 0; mm < N_MO; ++mm)
+            if (m[mm + a * N_MO] != 100.0 + a * N_MO + mm)
+              throw std::runtime_error("input tests: mo_coeff element mismatch");
+        for (size_t k = 0; k < N_RI; ++k)
+          for (size_t j = 0; j < N_AO; ++j)
+            for (size_t i = 0; i < N_AO; ++i)
+              if (e[i + j * N_AO + k * N_AO * N_AO] != 1000.0 + i + j * N_AO + k * N_AO * N_AO)
+                throw std::runtime_error("input tests: eri3 element mismatch");
+      }
+
+      // eta round-tripped and marked supplied.
+      if (g.eta != 1e-5 || !g.eta_was_supplied)
+        throw std::runtime_error("input tests: supplied eta did not round-trip exactly");
+    }
+
+    // B2. Missing dataset -> clear, keyword-bearing error (not success).
+    {
+      if (!throws_ia_with(
+          [&] {
+            const InputCatalog cat = InputCatalog::from_text(
+                "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = mo_coeff\nERI3 = nope_here\n", h5);
+            (void)cat.require_gf2();
+          }, {"ERI3", "nope_here"}))
+        throw std::runtime_error("input tests: a missing ERI3 dataset should fail with its name");
+    }
+
+    // B3. Rank mismatch on a required dataset is a hard error.
+    {
+      if (!throws_ia_with(
+          [&] {
+            const InputCatalog cat = InputCatalog::from_text(
+                "CALCULATION = GF2\nHCORE = eri3\nMO_COEFF = mo_coeff\nERI3 = eri3\n", h5);
+            (void)cat.require_gf2();
+          }, {"HCORE", "rank 2"}))
+        throw std::runtime_error("input tests: a rank-3 dataset used as HCORE should be rejected for rank");
+    }
+
+    // B3b. HCORE must be a SQUARE AO x AO matrix.
+    {
+      if (!throws_ia_with(
+          [&] {
+            const InputCatalog cat = InputCatalog::from_text(
+                "CALCULATION = GF2\nHCORE = wide\nMO_COEFF = mo_coeff\nERI3 = eri3\n", h5);
+            (void)cat.require_gf2();
+          }, {"HCORE", "square"}))
+        throw std::runtime_error("input tests: a non-square dataset used as HCORE should be rejected");
+    }
+
+    // B3c. MO_COEFF's AO extent must match HCORE's.
+    {
+      if (!throws_ia_with(
+          [&] {
+            const InputCatalog cat = InputCatalog::from_text(
+                "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = ao_mis\nERI3 = eri3\n", h5);
+            (void)cat.require_gf2();
+          }, {"MO_COEFF", "AO"}))
+        throw std::runtime_error("input tests: a MO_COEFF AO extent mismatch should be rejected");
+    }
+
+    // B4. Element type must be float64; an integer dataset is rejected.
+    {
+      {
+        HighFive::File f(h5, HighFive::File::AccessMode::ReadWrite | HighFive::File::AccessMode::Create);
+        std::vector<int> bad(N_AO * N_AO);
+        for (size_t i = 0; i < bad.size(); ++i) bad[i] = (int)i;
+        f.createDataSet<int>("hcore_int", HighFive::DataSpace(std::vector<size_t>{N_AO, N_AO})).write_raw(bad.data());
+      }
+      if (!throws_ia_with(
+          [&] {
+            const InputCatalog cat = InputCatalog::from_text(
+                "CALCULATION = GF2\nHCORE = hcore_int\nMO_COEFF = mo_coeff\nERI3 = eri3\n", h5);
+            (void)cat.require_gf2();
+          }, {"HCORE", "float64"}))
+        throw std::runtime_error("input tests: an integer HCORE dataset must be rejected as non-float64");
+    }
+
+    // The happy-path fixture (B1) is left in place for a manual CLI smoke
+    // check (`./cppgw -i gf2.in -d <fixture>`); do not fail the suite over cleanup.
+    (void)h5;
+  }
+
+  // ------------------------------------------------------------------
+  //  C. CLI smoke check (manual acceptance, Story-2 style); the in-process
+  //     suite already covers the pipeline via A/B above.
+  // ------------------------------------------------------------------
 
   return 0;
 }

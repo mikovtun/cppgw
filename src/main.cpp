@@ -10,9 +10,8 @@
 // positional arguments) prints the help page and exits with code 2.
 
 #include "main.hpp"
+#include "input.hpp"
 #include "tests.hpp"
-
-#include <highfive/highfive.hpp>
 
 #include <exception>
 #include <fstream>
@@ -48,6 +47,8 @@ void print_help(const char* prog) {
 struct Options {
   bool        help  = false;
   bool        test  = false;
+  bool        missing_input = false;
+  bool        missing_data  = false;
   std::string input;
   std::string data;
 };
@@ -109,31 +110,58 @@ bool parse_args(int argc, char** argv, Options& opt) {
   }
   if (pos.empty() && !opt.input.empty() && !opt.data.empty())
     return true;
-  return false;                                // incomplete / ambiguous / extra args
+  if (pos.empty()) {
+    if (opt.data.empty() && !opt.input.empty()) {
+      opt.missing_data = true;     // input given, no data -> one-line error
+      return true;
+    }
+    if (opt.input.empty() && !opt.data.empty()) {
+      opt.missing_input = true;    // data given, no input -> one-line error
+      return true;
+    }
+  }
+  if (pos.size() == 1 && opt.input.empty() && opt.data.empty()) {
+    opt.input = pos[0];
+    opt.missing_data = true;       // one positional = input only
+    return true;
+  }
+  return false;                                // no args, or malformed mix -> help page
 }
 
 } // namespace
 
 namespace cppgw {
 
-// Check (on entry) that the input file is usable: it must exist and be
-// readable as text. The input format is extension-independent.
-//
-// Parsing of the input file's contents is intentionally not implemented yet
-// (see story 03); this function is a stub that will grow into the real parser.
-void check_input_file(const std::string& path) {
-  std::ifstream in(path);                       // default open mode: text, read
-  if (!in.is_open())
-    throw std::logic_error("cppgw: cannot open input file '" + path + "'");
-  // TODO(story 03): parse the input file contents (assumed text encoding).
-}
+// Story 05: run the calculation selected by the input file. The InputCatalog
+// owns parsing, defaults, sanitization, and dataset access; the per-calc
+// branches only consume typed requirement objects. For GF2 in this story that
+// is the bounded ingestion + wiring path (load + report); no GF2 numerics.
+int run_calculation(const std::string& input_path, const std::string& data_path) {
+  InputCatalog catalog = InputCatalog::from_file(input_path, data_path);
 
-// Check that the data file is a healthy HDF5 file by opening it read-only
-// with HighFive. HighFive throws (FileInvalid / SystemError /
-// FileDriverException) for a missing, corrupt, or non-HDF5 file.
-void check_data_file(const std::string& path) {
-  HighFive::File f(path, HighFive::File::ReadOnly);   // may throw
-  (void)f;
+  switch (catalog.resolved().calc) {
+    case Calc::Gf2: {
+      Gf2Input gf2 = catalog.require_gf2();
+
+      const auto report_tensor = [](const char* label, const Tensor<double, Executor::Host>& t) {
+        std::cout << "  " << label;
+        t.print(std::cout, /*with_data=*/false);
+      };
+
+      std::cout << "cppgw: calculation " << calc_name(catalog.resolved().calc) << "\n";
+      std::cout << "  data file: " << catalog.hdf5_path() << "\n";
+      report_tensor("hcore    : ", gf2.hcore);
+      report_tensor("mo_coeff : ", gf2.mo_coeff);
+      report_tensor("eri3     : ", gf2.eri3);
+      std::cout << "  eta      = " << gf2.eta
+                << (gf2.eta_was_supplied ? " (user-supplied)" : " (default 1e-5)") << "\n";
+      std::cout << "  (ingestion + wiring only; GF2 numerics are a later story)\n";
+      return 0;
+    }
+  }
+  std::cerr << "cppgw: no implementation for calculation '" 
+              << calc_name(catalog.resolved().calc) << "'\n";
+  return 2;
 }
 
 } // namespace cppgw
@@ -150,14 +178,27 @@ int main(int argc, char** argv) {
     print_help(prog);
     return 0;
   }
+  if (opt.missing_input) {
+    std::cerr << "cppgw: an input file is required (none given; see -h for usage)\n";
+    return 2;
+  }
+  if (opt.missing_data) {
+    std::cerr << "cppgw: a data file is required (none given; see -h for usage)\n";
+    return 2;
+  }
   if (opt.test) {
     return cppgw::run_tests();                   // throws on failure
   }
 
-  // Normal calculation mode: validate the inputs, then (later stories) run
-  // the calculation described by the input file.
-  cppgw::check_input_file(opt.input);
-  cppgw::check_data_file(opt.data);
-  // TODO: entry point for the (to-be-determined) calculation goes here.
-  return 0;
+  // Normal calculation mode (Story 05): the InputCatalog owns parsing,
+  // defaults, sanitization, and dataset access; the calc branch consumes the
+  // typed requirement object. Calculation/data failures print an actionable
+  // message and exit 2, and do NOT print the help page (help is reserved for
+  // invalid invocations above).
+  try {
+    return cppgw::run_calculation(opt.input, opt.data);
+  } catch (const std::exception& e) {
+    std::cerr << "cppgw: " << e.what() << '\n';
+    return 2;
+  }
 }
