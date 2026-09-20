@@ -10,6 +10,7 @@ to an HDF5 file:
     - n_elec    : number of electrons (scalar)
     - hcore     : core Hamiltonian (kinetic + nuclear attraction), AO basis,
                   shape (nao, nao)
+    - ovlp      : AO overlap matrix, shape (nao, nao)
 """
 
 import h5py
@@ -50,6 +51,7 @@ mo_energy = mf.mo_energy         # MO energies, shape (nmo,)
 dm        = mf.make_rdm1()       # AO density matrix, shape (nao, nao)
 n_elec    = mol.nelectron        # number of electrons
 hcore     = mf.get_hcore()       # core Hamiltonian, AO basis, shape (nao, nao)
+ovlp      = mf.get_ovlp()        # AO overlap matrix, shape (nao, nao)
 
 # 3-center density-fitted ERIs (P|mu nu) in the AO basis.
 # with_df.loop() yields blocks packed over the lower-triangle of AO pairs;
@@ -76,6 +78,7 @@ with h5py.File(out_file, 'w') as f:
     f.create_dataset('mo_energy', data=mo_energy)
     f.create_dataset('n_elec', data=n_elec)
     f.create_dataset('hcore', data=hcore)
+    f.create_dataset('ovlp', data=ovlp)
     f.attrs['scf_energy'] = energy
     f.attrs['naux'] = naux
     f.attrs['nao'] = nao
