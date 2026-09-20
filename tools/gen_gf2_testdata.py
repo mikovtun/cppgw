@@ -11,6 +11,14 @@ to an HDF5 file:
     - hcore     : core Hamiltonian (kinetic + nuclear attraction), AO basis,
                   shape (nao, nao)
     - ovlp      : AO overlap matrix, shape (nao, nao)
+    - sigma_static : static self-energy, J - 0.5*K, AO basis, shape (nao, nao)
+    - g0        : non-interacting Green's function on the Matsubara grid,
+                  G_0(iw_n) = [(i w_n + mu) S - F]^-1, AO basis,
+                  complex, shape (n_matsubara, nao, nao)
+    - omega_n   : fermionic Matsubara frequencies w_n, shape (n_matsubara,)
+
+Attributes 'beta' (inverse temperature) and 'mu' (chemical potential used
+for G_0) are stored alongside the other attrs.
 """
 
 import h5py
@@ -68,7 +76,36 @@ for block in with_df.loop():
     p0 = p1
 
 # ------------------------------------------------------------------
-# 4. Save everything to an HDF5 file
+# 4. Static self-energy and non-interacting Green's function
+# ------------------------------------------------------------------
+# Static self-energy: Sigma_static = J - 0.5*K (AO basis). vj, vk are built
+# from the density-fitted integrals via mf.get_jk, consistent with the SCF.
+vj, vk = mf.get_jk(mol, dm)
+sigma_static = vj - 0.5 * vk
+
+# Fock matrix consistent with sigma_static (F = hcore + J - 0.5*K for RHF)
+fock = hcore + sigma_static
+
+# Chemical potential: midpoint of the HOMO-LUMO gap. Override this with a
+# fixed value (e.g. mu = 0.0) if your application calls for a different
+# convention.
+nocc = n_elec // 2
+mu = 0.5 * (mo_energy[nocc - 1] + mo_energy[nocc])
+
+# Fermionic Matsubara grid: w_n = (2n+1) pi / beta, n = 0, 1, ..., n_matsubara-1
+# Adjust beta (inverse temperature, in Ha^-1) and n_matsubara as needed.
+beta = 100.0
+n_matsubara = 200
+n_indices = np.arange(n_matsubara)
+omega_n = (2 * n_indices + 1) * np.pi / beta
+
+# G_0(iw_n) = [(i w_n + mu) S - F]^-1, AO basis
+g0 = np.empty((n_matsubara, nao, nao), dtype=np.complex128)
+for n, wn in enumerate(omega_n):
+    g0[n] = np.linalg.inv((1j * wn + mu) * ovlp - fock)
+
+# ------------------------------------------------------------------
+# 5. Save everything to an HDF5 file
 # ------------------------------------------------------------------
 out_file = 'rhf_df_data.h5'
 with h5py.File(out_file, 'w') as f:
@@ -79,8 +116,13 @@ with h5py.File(out_file, 'w') as f:
     f.create_dataset('n_elec', data=n_elec)
     f.create_dataset('hcore', data=hcore)
     f.create_dataset('ovlp', data=ovlp)
+    f.create_dataset('sigma_static', data=sigma_static)
+    f.create_dataset('g0', data=g0)
+    f.create_dataset('omega_n', data=omega_n)
     f.attrs['scf_energy'] = energy
     f.attrs['naux'] = naux
     f.attrs['nao'] = nao
+    f.attrs['beta'] = beta
+    f.attrs['mu'] = mu
 
 print(f"Saved RHF/DF results to {out_file}")
