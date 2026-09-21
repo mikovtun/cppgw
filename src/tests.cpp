@@ -1108,6 +1108,11 @@ int run_input_data_loading_tests() {
          + "HCORE = paths/hcore\n"
          + "MO_COEFF = paths/mo_coeff\n"
          + "ERI3 = paths/eri3\n"
+         + "OVERLAP = paths/overlap\n"
+         + "DENSITY_MATRIX = paths/density_matrix\n"
+         + "BETA = 10.0\n"
+         + "MATSUBARA_HALF_N = 2\n"
+         + "MU = 0.0\n"
          + extra;
   };
 
@@ -1124,6 +1129,11 @@ int run_input_data_loading_tests() {
       "hcore  =  paths/hcore\n"
       "Mo_Coeff=paths/mo_coeff\n"
       "ERI3 = My/Path/eri3\n"
+      "OVERLAP = paths/overlap\n"
+      "DENSITY_MATRIX = paths/density_matrix\n"
+      "BETA = 10.0\n"
+      "MATSUBARA_HALF_N = 2\n"
+      "MU = -0.25\n"
       "eta   =  1e-5\n";
     const ResolvedInput r = parse_input(text);
     if (r.calc != Calc::Gf2)
@@ -1147,7 +1157,12 @@ int run_input_data_loading_tests() {
     const std::string text =
       "CALCULATION = gf2\n"
       "HCORE = hcore\nMO_COEFF = mo\n"
-      "ErI3 = My/Path/eri3\n";
+      "ErI3 = My/Path/eri3\n"
+      "OVERLAP = My/Path/Overlap\n"
+      "DENSITY_MATRIX = My/Path/Density\n"
+      "BETA = 10\n"
+      "MATSUBARA_HALF_N = 2\n"
+      "MU = 0\n";
     const ResolvedInput r = parse_input(text);
     if (r.get_string("ERI3") != "My/Path/eri3")
       throw std::runtime_error("input tests: keyword case-folding broke the ERI3 value");
@@ -1155,7 +1170,8 @@ int run_input_data_loading_tests() {
   {
     const std::string text =
       "calculation = Gf2\n"
-      "HCORE = hcore\nMO_COEFF = mo\nERI3 = eri3\n";
+      "HCORE = hcore\nMO_COEFF = mo\nERI3 = eri3\n"
+      "OVERLAP = overlap\nDENSITY_MATRIX = density_matrix\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\n";
     const ResolvedInput r = parse_input(text);
     if (r.calc != Calc::Gf2)
       throw std::runtime_error("input tests: calc case-folding is wrong");
@@ -1165,7 +1181,7 @@ int run_input_data_loading_tests() {
   {
     for (const std::string tok : {"1e-5", "1E-5", "1D-5", "1d-5", "0.00001", "1.0E-5", "+0.00001", "0.01e-3"}) {
       const ResolvedInput r = parse_input(
-          "CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\neta = " + tok + "\n");
+          "CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\nOVERLAP = s\nDENSITY_MATRIX = p\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\neta = " + tok + "\n");
       if (r.get_double("ETA") != 1e-5) {
         std::ostringstream oss;
         oss << "input tests: double token '" << tok << "' did not parse to 1e-5";
@@ -1192,7 +1208,7 @@ int run_input_data_loading_tests() {
     if (!throws_ia_with([&] { parse_input(text_with("HERI3 = x\n")); }, {"HERI3"}))
       throw std::runtime_error("input tests: unknown keyword HERI3 should be rejected");
     if (!throws_ia_with(
-        [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\nBOGUS = 1\n"); },
+        [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\nOVERLAP = s\nDENSITY_MATRIX = p\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\nBOGUS = 1\n"); },
         {"BOGUS"}))
       throw std::runtime_error("input tests: unknown keyword BOGUS should be rejected");
   }
@@ -1201,7 +1217,7 @@ int run_input_data_loading_tests() {
   {
     // Missing CALCULATION -> hard error.
     if (!throws_ia_with(
-        [&] { parse_input("HCORE = h\nMO_COEFF = m\nERI3 = e\n"); },
+        [&] { parse_input("HCORE = h\nMO_COEFF = m\nERI3 = e\nOVERLAP = s\nDENSITY_MATRIX = p\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\n"); },
         {"CALCULATION"}))
       throw std::runtime_error("input tests: missing CALCULATION should be rejected");
     // Unknown calculation name -> hard error, naming the value.
@@ -1222,11 +1238,11 @@ int run_input_data_loading_tests() {
   // A8. Malformed lines.
   {
     if (!throws_ia_with(
-        [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\njust some words\n"); },
+        [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\nOVERLAP = s\nDENSITY_MATRIX = p\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\njust some words\n"); },
         {}))
       throw std::runtime_error("input tests: a line without '=' should be rejected");
     if (!throws_ia_with(
-        [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\n= value\n"); },
+        [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\nOVERLAP = s\nDENSITY_MATRIX = p\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\n= value\n"); },
         {}))
       throw std::runtime_error("input tests: an empty keyword should be rejected");
   }
@@ -1235,7 +1251,7 @@ int run_input_data_loading_tests() {
   {
     for (const std::string bad : {"foo", "1e-5x", "5!", "inf", "infinity", "nan"}) {
       if (!throws_ia_with(
-          [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\neta = " + bad + "\n"); },
+          [&] { parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\nOVERLAP = s\nDENSITY_MATRIX = p\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\neta = " + bad + "\n"); },
           {"ETA"})) {
         std::ostringstream oss;
         oss << "input tests: bad double token '" << bad << "' should be rejected";
@@ -1254,6 +1270,31 @@ int run_input_data_loading_tests() {
         [&] { parse_input(text_with("eta = 0\n")); },
         {"ETA"}))
       throw std::runtime_error("input tests: zero ETA should be rejected");
+  }
+
+  // A10b. Story 07.1 scalar parsing/ranges: strict positive integer half-grid,
+  // positive finite beta, and finite (but not necessarily positive) mu.
+  {
+    const auto scalar_text = [](const std::string& half, const std::string& beta, const std::string& mu) {
+      return std::string("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\n")
+           + "OVERLAP = s\nDENSITY_MATRIX = p\nBETA = " + beta
+           + "\nMATSUBARA_HALF_N = " + half + "\nMU = " + mu + "\n";
+    };
+    const ResolvedInput r = parse_input(scalar_text("2", "10.0", "-1.25"));
+    if (r.get_double("BETA") != 10.0 || r.get_int("MATSUBARA_HALF_N") != 2 || r.get_double("MU") != -1.25)
+      throw std::runtime_error("input tests: BETA/MATSUBARA_HALF_N/MU typed accessors are wrong");
+    for (const std::string bad : {"4.0", "1e3", "x", "4x", "-4", "+4"}) {
+      if (!throws_ia_with([&] { parse_input(scalar_text(bad, "10", "0")); }, {"MATSUBARA_HALF_N"}))
+        throw std::runtime_error("input tests: malformed MATSUBARA_HALF_N token should be rejected");
+    }
+    if (!throws_ia_with([&] { parse_input(scalar_text("0", "10", "0")); }, {"MATSUBARA_HALF_N"}))
+      throw std::runtime_error("input tests: zero MATSUBARA_HALF_N should be rejected");
+    if (!throws_ia_with([&] { parse_input(scalar_text("2", "0", "0")); }, {"BETA"}))
+      throw std::runtime_error("input tests: zero BETA should be rejected");
+    if (!throws_ia_with([&] { parse_input(scalar_text("2", "-1", "0")); }, {"BETA"}))
+      throw std::runtime_error("input tests: negative BETA should be rejected");
+    if (!throws_ia_with([&] { parse_input(scalar_text("2", "10", "nan")); }, {"MU"}))
+      throw std::runtime_error("input tests: nonfinite MU should be rejected");
   }
 
   // A11. Duplicate keyword -> hard error naming both lines' keyword.
@@ -1288,11 +1329,15 @@ int run_input_data_loading_tests() {
       std::vector<double> hcore(N_AO * N_AO);    fill(hcore, 1.0);
       std::vector<double> mo    (N_AO * N_MO);   fill(mo,    100.0);
       std::vector<double> eri3  (N_RI * N_AO * N_AO); fill(eri3, 1000.0);
+      std::vector<double> overlap(N_AO * N_AO);  fill(overlap, 3000.0);
+      std::vector<double> density(N_AO * N_AO);  fill(density, 4000.0);
       std::vector<double> wide  (N_AO * 2);      fill(wide,  10000.0);   // deliberately non-square
       std::vector<double> aomis (2 * 2);         fill(aomis, 20000.0);   // AO extent != N_AO
       f.createDataSet<double>("hcore",    HighFive::DataSpace(std::vector<size_t>{N_AO, N_AO})).write_raw(hcore.data());
       f.createDataSet<double>("mo_coeff", HighFive::DataSpace(std::vector<size_t>{N_AO, N_MO})).write_raw(mo.data());
       f.createDataSet<double>("eri3",     HighFive::DataSpace(std::vector<size_t>{N_RI, N_AO, N_AO})).write_raw(eri3.data());
+      f.createDataSet<double>("overlap",  HighFive::DataSpace(std::vector<size_t>{N_AO, N_AO})).write_raw(overlap.data());
+      f.createDataSet<double>("density_matrix", HighFive::DataSpace(std::vector<size_t>{N_AO, N_AO})).write_raw(density.data());
       f.createDataSet<double>("wide",     HighFive::DataSpace(std::vector<size_t>{N_AO, 2})).write_raw(wide.data());
       f.createDataSet<double>("ao_mis",   HighFive::DataSpace(std::vector<size_t>{2, 2})).write_raw(aomis.data());
     }
@@ -1300,7 +1345,7 @@ int run_input_data_loading_tests() {
     // B1. Happy load: dims, labels, declared symmetries, and an exact copy.
     {
       const InputCatalog cat = InputCatalog::from_text(
-          "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = mo_coeff\nERI3 = eri3\neta = 1e-5\n",
+          "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = mo_coeff\nERI3 = eri3\nOVERLAP = overlap\nDENSITY_MATRIX = density_matrix\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\neta = 1e-5\n",
           h5);
       Gf2Input g = cat.require_gf2();
 
@@ -1380,22 +1425,39 @@ int run_input_data_loading_tests() {
     }
 
     // B2. Missing dataset -> clear, keyword-bearing error (not success).
-    {
-      if (!throws_ia_with(
-          [&] {
-            const InputCatalog cat = InputCatalog::from_text(
-                "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = mo_coeff\nERI3 = nope_here\n", h5);
-            (void)cat.require_gf2();
-          }, {"ERI3", "nope_here"}))
-        throw std::runtime_error("input tests: a missing ERI3 dataset should fail with its name");
-    }
+    // HDF5's C-level error handler prints a HDF5-DIAG block to stderr itself
+    // (before HighFive raises the C++ exception we assert on). That output
+    // looks like an unintended failure, so silence the C handler for exactly
+    // this deliberate negative test; the RAII guard restores the default
+    // handler even if the check below throws.
+    struct Hdf5ErrorQuiet {
+      H5E_auto2_t saved_api_func = nullptr;   void* saved_api_data = nullptr;
+      Hdf5ErrorQuiet() {
+        H5Eget_auto2(H5E_DEFAULT, &saved_api_func, &saved_api_data);
+        // Silence the default API error callback (the one that prints the
+        // HDF5-DIAG stack to stderr) for the duration of the guard.
+        H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+      }
+      ~Hdf5ErrorQuiet() {
+        H5Eset_auto2(H5E_DEFAULT, saved_api_func, saved_api_data);
+      }
+      Hdf5ErrorQuiet(const Hdf5ErrorQuiet&) = delete;
+      Hdf5ErrorQuiet& operator=(const Hdf5ErrorQuiet&) = delete;
+    } quiet;
+    if (!throws_ia_with(
+        [&] {
+          const InputCatalog cat = InputCatalog::from_text(
+              "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = mo_coeff\nERI3 = nope_here\nOVERLAP = overlap\nDENSITY_MATRIX = density_matrix\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\n", h5);
+          (void)cat.require_gf2();
+        }, {"ERI3", "nope_here"}))
+      throw std::runtime_error("input tests: a missing ERI3 dataset should fail with its name");
 
     // B3. Rank mismatch on a required dataset is a hard error.
     {
       if (!throws_ia_with(
           [&] {
             const InputCatalog cat = InputCatalog::from_text(
-                "CALCULATION = GF2\nHCORE = eri3\nMO_COEFF = mo_coeff\nERI3 = eri3\n", h5);
+                "CALCULATION = GF2\nHCORE = eri3\nMO_COEFF = mo_coeff\nERI3 = eri3\nOVERLAP = overlap\nDENSITY_MATRIX = density_matrix\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\n", h5);
             (void)cat.require_gf2();
           }, {"HCORE", "rank 2"}))
         throw std::runtime_error("input tests: a rank-3 dataset used as HCORE should be rejected for rank");
@@ -1406,7 +1468,7 @@ int run_input_data_loading_tests() {
       if (!throws_ia_with(
           [&] {
             const InputCatalog cat = InputCatalog::from_text(
-                "CALCULATION = GF2\nHCORE = wide\nMO_COEFF = mo_coeff\nERI3 = eri3\n", h5);
+                "CALCULATION = GF2\nHCORE = wide\nMO_COEFF = mo_coeff\nERI3 = eri3\nOVERLAP = overlap\nDENSITY_MATRIX = density_matrix\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\n", h5);
             (void)cat.require_gf2();
           }, {"HCORE", "square"}))
         throw std::runtime_error("input tests: a non-square dataset used as HCORE should be rejected");
@@ -1417,7 +1479,7 @@ int run_input_data_loading_tests() {
       if (!throws_ia_with(
           [&] {
             const InputCatalog cat = InputCatalog::from_text(
-                "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = ao_mis\nERI3 = eri3\n", h5);
+                "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = ao_mis\nERI3 = eri3\nOVERLAP = overlap\nDENSITY_MATRIX = density_matrix\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\n", h5);
             (void)cat.require_gf2();
           }, {"MO_COEFF", "AO"}))
         throw std::runtime_error("input tests: a MO_COEFF AO extent mismatch should be rejected");
@@ -1434,7 +1496,7 @@ int run_input_data_loading_tests() {
       if (!throws_ia_with(
           [&] {
             const InputCatalog cat = InputCatalog::from_text(
-                "CALCULATION = GF2\nHCORE = hcore_int\nMO_COEFF = mo_coeff\nERI3 = eri3\n", h5);
+                "CALCULATION = GF2\nHCORE = hcore_int\nMO_COEFF = mo_coeff\nERI3 = eri3\nOVERLAP = overlap\nDENSITY_MATRIX = density_matrix\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\n", h5);
             (void)cat.require_gf2();
           }, {"HCORE", "float64"}))
         throw std::runtime_error("input tests: an integer HCORE dataset must be rejected as non-float64");
@@ -1446,8 +1508,135 @@ int run_input_data_loading_tests() {
   }
 
   // ------------------------------------------------------------------
-  //  C. CLI smoke check (manual acceptance, Story-2 style); the in-process
-  //     suite already covers the pipeline via A/B above.
+  //  C. Story 07.1 numerical GF2 initial-guess checks
+  // ------------------------------------------------------------------
+  {
+    auto make_manual_input = [](size_t n_ao, size_t n_ri) {
+      Gf2Input in;
+      const SymGroup hm = Hermitian();
+      const SymGroup sm = Symmetric();
+      in.hcore = Tensor<double, Host>({TensorDim{"ao", n_ao, hm}, TensorDim{"ao", n_ao, hm}});
+      const SymGroup og = Hermitian();
+      const SymGroup pg = Hermitian();
+      in.overlap = Tensor<double, Host>({TensorDim{"ao", n_ao, og}, TensorDim{"ao", n_ao, og}});
+      in.density_matrix = Tensor<double, Host>({TensorDim{"ao", n_ao, pg}, TensorDim{"ao", n_ao, pg}});
+      in.mo_coeff = Tensor<double, Host>({TensorDim{"mo", n_ao}, TensorDim{"ao", n_ao}});
+      in.eri3 = Tensor<double, Host>({TensorDim{"ao", n_ao, sm}, TensorDim{"ao", n_ao, sm}, TensorDim{"ri", n_ri}});
+      in.beta = 5.0;
+      in.matsubara_half_n = 2;
+      in.mu = -0.2;
+      return in;
+    };
+
+    // One-AO analytic Green's-function check over both negative and positive Matsubara points.
+    {
+      Gf2Input in = make_manual_input(1, 1);
+      in.hcore(0, 0) = 0.7;
+      in.overlap(0, 0) = 1.3;
+      in.density_matrix(0, 0) = 0.4;
+      in.eri3(0, 0, 0) = 0.9;
+      Gf2InitialGuess r = make_gf2_initial_guess(in);
+      const double sigma_ref = 0.9 * (0.9 * 0.4) - 0.5 * (0.9 * 0.4 * 0.9);
+      if (std::abs(r.sigma_hf(0, 0) - sigma_ref) > 1e-13)
+        throw std::runtime_error("GF2 initial-guess tests: one-AO sigma_hf is wrong");
+      if (std::abs(r.electron_count - 0.4 * 1.3) > 1e-13)
+        throw std::runtime_error("GF2 initial-guess tests: one-AO electron count is wrong");
+      if (r.green.size() != 2 * in.matsubara_half_n || r.green.data().dims()[0].label != TensorDimLabel(GridExpansionMatsubara<cplx, Fermionic>::dim_label))
+        throw std::runtime_error("GF2 initial-guess tests: Matsubara representation metadata is wrong");
+      for (size_t n = 0; n < r.green.size(); ++n) {
+        const cplx denom = cplx(in.mu, r.green.grid()(n).value) * in.overlap(0, 0) - (in.hcore(0, 0) + sigma_ref);
+        const cplx ref = cplx(1.0, 0.0) / denom;
+        if (std::abs(r.green.data()(n, 0, 0) - ref) > 1e-12)
+          throw std::runtime_error("GF2 initial-guess tests: one-AO Green's function is wrong");
+      }
+    }
+
+    // Two-AO static self-energy, electron count, residual A_n G_n = I, and ETA non-use.
+    {
+      Gf2Input in = make_manual_input(2, 2);
+      in.beta = 7.0;
+      in.matsubara_half_n = 2;
+      in.mu = 0.35;
+      in.eta = 1e-5;
+      in.hcore(0,0)=0.6; in.hcore(1,0)=0.1; in.hcore(0,1)=0.1; in.hcore(1,1)=0.9;
+      in.overlap(0,0)=1.1; in.overlap(1,0)=0.2; in.overlap(0,1)=0.2; in.overlap(1,1)=1.4;
+      in.density_matrix(0,0)=0.8; in.density_matrix(1,0)=0.15; in.density_matrix(0,1)=0.12; in.density_matrix(1,1)=0.5;
+      in.eri3(0,0,0)=0.7; in.eri3(1,0,0)=0.2; in.eri3(0,1,0)=0.3; in.eri3(1,1,0)=0.5;
+      in.eri3(0,0,1)=0.4; in.eri3(1,0,1)=0.6; in.eri3(0,1,1)=0.1; in.eri3(1,1,1)=0.8;
+
+      Gf2InitialGuess r = make_gf2_initial_guess(in);
+      double rho[2]{};
+      for (size_t Q = 0; Q < 2; ++Q)
+        for (size_t k = 0; k < 2; ++k)
+          for (size_t l = 0; l < 2; ++l)
+            rho[Q] += in.eri3(k,l,Q) * in.density_matrix(k,l);
+      for (size_t u = 0; u < 2; ++u)
+        for (size_t v = 0; v < 2; ++v) {
+          double J = 0.0, K = 0.0;
+          for (size_t Q = 0; Q < 2; ++Q) {
+            J += in.eri3(u,v,Q) * rho[Q];
+            for (size_t k = 0; k < 2; ++k)
+              for (size_t l = 0; l < 2; ++l)
+                K += in.eri3(u,l,Q) * in.density_matrix(k,l) * in.eri3(k,v,Q);
+          }
+          const double sigma_ref = J - 0.5 * K;
+          if (std::abs(r.sigma_hf(u,v) - sigma_ref) > 1e-13)
+            throw std::runtime_error("GF2 initial-guess tests: two-AO sigma_hf is wrong");
+          if (std::abs(r.fock(u,v) - (in.hcore(u,v) + sigma_ref)) > 1e-13)
+            throw std::runtime_error("GF2 initial-guess tests: fock != hcore + sigma_hf");
+        }
+      double ne = 0.0;
+      for (size_t u = 0; u < 2; ++u)
+        for (size_t v = 0; v < 2; ++v)
+          ne += in.density_matrix(u,v) * in.overlap(v,u);
+      if (std::abs(r.electron_count - ne) > 1e-13)
+        throw std::runtime_error("GF2 initial-guess tests: two-AO electron count is wrong");
+
+      for (size_t n = 0; n < r.green.size(); ++n) {
+        for (size_t u = 0; u < 2; ++u) {
+          for (size_t v = 0; v < 2; ++v) {
+            cplx lhs{};
+            for (size_t k = 0; k < 2; ++k) {
+              const cplx A = cplx(in.mu, r.green.grid()(n).value) * in.overlap(u,k) - r.fock(u,k);
+              lhs += A * r.green.data()(n,k,v);
+            }
+            const cplx ref = (u == v) ? cplx(1.0, 0.0) : cplx(0.0, 0.0);
+            if (std::abs(lhs - ref) > 1e-11)
+              throw std::runtime_error("GF2 initial-guess tests: multi-AO solve residual is too large");
+          }
+        }
+      }
+
+      Gf2Input eta_changed = in;
+      eta_changed.eta = 9.9;
+      Gf2InitialGuess r_eta = make_gf2_initial_guess(eta_changed);
+      for (size_t i = 0; i < r.green.data().total_elements(); ++i)
+        if (std::abs(r.green.data().linear(i) - r_eta.green.data().linear(i)) > 0.0)
+          throw std::runtime_error("GF2 initial-guess tests: eta changed the Matsubara Green's function");
+    }
+
+    // Singular coefficient matrices must identify the Matsubara point rather than returning partial data.
+    {
+      Gf2Input in = make_manual_input(1, 1);
+      in.hcore(0,0) = 0.0;
+      in.overlap(0,0) = 0.0;
+      in.density_matrix(0,0) = 0.0;
+      in.eri3(0,0,0) = 0.0;
+      bool saw_frequency_context = false;
+      try {
+        (void)make_gf2_initial_guess(in);
+      } catch (const std::runtime_error& e) {
+        const std::string msg = e.what();
+        saw_frequency_context = msg.find("Matsubara index") != std::string::npos;
+      }
+      if (!saw_frequency_context)
+        throw std::runtime_error("GF2 initial-guess tests: singular solve did not report Matsubara context");
+    }
+  }
+
+  // ------------------------------------------------------------------
+  //  D. CLI smoke check (manual acceptance, Story-2 style); the in-process
+  //     suite already covers the pipeline via A/B/C above.
   // ------------------------------------------------------------------
 
   return 0;

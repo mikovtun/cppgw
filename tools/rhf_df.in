@@ -1,0 +1,9 @@
+calculation = gf2
+eri3 = eri_3c
+hcore = hcore
+mo_coeff = mo_coeff
+density_matrix = dm
+overlap = ovlp
+beta = 100
+mu = -0.15392630659760376
+matsubara_half_n = 200

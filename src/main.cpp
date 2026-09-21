@@ -132,30 +132,34 @@ bool parse_args(int argc, char** argv, Options& opt) {
 
 namespace cppgw {
 
-// Story 05: run the calculation selected by the input file. The InputCatalog
-// owns parsing, defaults, sanitization, and dataset access; the per-calc
-// branches only consume typed requirement objects. For GF2 in this story that
-// is the bounded ingestion + wiring path (load + report); no GF2 numerics.
+// Run the calculation selected by the input file. The InputCatalog owns
+// parsing, defaults, sanitization, and dataset access; per-calc branches consume
+// typed requirement objects.
 int run_calculation(const std::string& input_path, const std::string& data_path) {
   InputCatalog catalog = InputCatalog::from_file(input_path, data_path);
 
   switch (catalog.resolved().calc) {
     case Calc::Gf2: {
       Gf2Input gf2 = catalog.require_gf2();
+      Gf2InitialGuess guess = make_gf2_initial_guess(gf2);
 
-      const auto report_tensor = [](const char* label, const Tensor<double, Executor::Host>& t) {
-        std::cout << "  " << label;
-        t.print(std::cout, /*with_data=*/false);
-      };
-
+      const size_t n_ao = gf2.hcore.dims()[0].dim;
+      const size_t n_ri = gf2.eri3.dims()[2].dim;
       std::cout << "cppgw: calculation " << calc_name(catalog.resolved().calc) << "\n";
       std::cout << "  data file: " << catalog.hdf5_path() << "\n";
-      report_tensor("hcore    : ", gf2.hcore);
-      report_tensor("mo_coeff : ", gf2.mo_coeff);
-      report_tensor("eri3     : ", gf2.eri3);
-      std::cout << "  eta      = " << gf2.eta
-                << (gf2.eta_was_supplied ? " (user-supplied)" : " (default 1e-5)") << "\n";
-      std::cout << "  (ingestion + wiring only; GF2 numerics are a later story)\n";
+      std::cout << "  AO dimension: " << n_ao << ", RI dimension: " << n_ri << "\n";
+      std::cout << "  beta = " << gf2.beta
+                << ", matsubara_half_n = " << gf2.matsubara_half_n
+                << ", total Matsubara points = " << guess.green.size() << "\n";
+      std::cout << "  mu = " << gf2.mu << "\n";
+      std::cout << "  Tr(P S) electron-count diagnostic = " << guess.electron_count << "\n";
+      std::cout << "  eta = " << gf2.eta
+                << (gf2.eta_was_supplied ? " (user-supplied, unused here)" : " (default 1e-5, unused here)") << "\n";
+      std::cout << "  constructed AO Matsubara initial Green's function (non-self-consistent; no dynamic self-energy, Fourier transform, or chemical-potential search)\n";
+
+      const std::string out_path = "cppgw_output.h5";
+      write_gf2_output_hdf5(gf2, guess, out_path);
+      std::cout << "  wrote g0, sigma_hf, and input parameters to " << out_path << "\n";
       return 0;
     }
   }
