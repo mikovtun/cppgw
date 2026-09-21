@@ -1635,6 +1635,150 @@ int run_input_data_loading_tests() {
   }
 
   // ------------------------------------------------------------------
+  //  Story 05.1: definition-driven input cleanup (calculation + dataset
+  //  definition tables, string-keyed dataset access). B's fixture file is
+  //  still on disk (N_AO=24, N_MO=12, N_RI=30).
+  // ------------------------------------------------------------------
+  // S1. The calculation registry: exactly the GF2 row, with the exact
+  //     required/optional sets and order.
+  {
+    const std::vector<CalculationDefinition>& calcs = calculation_registry();
+    if (calcs.size() != 1 || calcs[0].calc != Calc::Gf2)
+      throw std::runtime_error("05.1 tests: the calculation registry must contain exactly the GF2 row");
+    const CalculationDefinition& gf2 = calculation_def(Calc::Gf2);
+    if (gf2.name != "GF2")
+      throw std::runtime_error("05.1 tests: GF2 row name is wrong");
+    const std::vector<std::string> req_ds{"HCORE", "MO_COEFF", "ERI3", "OVERLAP", "DENSITY_MATRIX"};
+    const std::vector<std::string> req_par{"BETA", "MATSUBARA_HALF_N", "MU"};
+    const std::vector<std::string> opt{"ETA"};
+    if (gf2.required_datasets != req_ds || gf2.required_parameters != req_par || gf2.optional_keywords != opt)
+      throw std::runtime_error("05.1 tests: the GF2 requirement sets are not exactly {datasets, parameters, optional}");
+    bool none_threw = false;
+    try { (void)calculation_def(Calc::None); }
+    catch (const std::logic_error&) { none_threw = true; }
+    if (!none_threw)
+      throw std::runtime_error("05.1 tests: calculation_def(Calc::None) must throw std::logic_error");
+    if (std::string(calc_name(Calc::Gf2)) != "GF2" || std::string(calc_name(Calc::None)) != "?")
+      throw std::runtime_error("05.1 tests: calc_name names were changed (must be \"GF2\" / \"?\")");
+  }
+
+  // S2. The dataset-definition table: the five GF2 rows with axes (labels,
+  //     order, count), symmetry kind, and extent reference.
+  {
+    const std::vector<DatasetDefinition>& defs = dataset_definitions();
+    if (defs.size() != 5)
+      throw std::runtime_error("05.1 tests: the dataset table must hold exactly the five GF2 rows");
+    auto labels = [](const DatasetDefinition& d) {
+      std::vector<std::string> v;
+      for (const DatasetAxisSpec& a : d.axes) v.push_back(label_to_string(a.label));
+      return v;
+    };
+    const DatasetDefinition& h = dataset_definition("HCORE");
+    if (labels(h) != (std::vector<std::string>{"ao", "ao"}) || h.symmetry != SymKind::Hermitian || h.extent_ref.has_value())
+      throw std::runtime_error("05.1 tests: HCORE row is not {ao, ao, Hermitian, no-reference}");
+    const DatasetDefinition& m = dataset_definition("MO_COEFF");
+    if (labels(m) != (std::vector<std::string>{"mo", "ao"}) || m.symmetry.has_value() || m.extent_ref != std::string("HCORE"))
+      throw std::runtime_error("05.1 tests: MO_COEFF row is not {mo, ao, plain, ref=HCORE}");
+    const DatasetDefinition& e = dataset_definition("ERI3");
+    if (labels(e) != (std::vector<std::string>{"ao", "ao", "ri"}) || e.symmetry != SymKind::Symmetric || e.extent_ref != std::string("HCORE"))
+      throw std::runtime_error("05.1 tests: ERI3 row is not {ao, ao, ri, Symmetric, ref=HCORE}");
+    const DatasetDefinition& o = dataset_definition("OVERLAP");
+    if (labels(o) != (std::vector<std::string>{"ao", "ao"}) || o.symmetry != SymKind::Hermitian || o.extent_ref != std::string("HCORE"))
+      throw std::runtime_error("05.1 tests: OVERLAP row is not {ao, ao, Hermitian, ref=HCORE}");
+    const DatasetDefinition& p = dataset_definition("DENSITY_MATRIX");
+    if (labels(p) != (std::vector<std::string>{"ao", "ao"}) || p.symmetry != SymKind::Hermitian || p.extent_ref != std::string("HCORE"))
+      throw std::runtime_error("05.1 tests: DENSITY_MATRIX row is not {ao, ao, Hermitian, ref=HCORE}");
+    // Lookups are case-insensitive.
+    if (&dataset_definition("dEnSiTy_maTrIx") != &p)
+      throw std::runtime_error("05.1 tests: dataset_definition must be case-insensitive");
+    // Parameters are NOT datasets.
+    if (!throws_ia_with([&] { (void)dataset_definition("eta"); }, {"eta", "known datasets"}))
+      throw std::runtime_error("05.1 tests: the parameter ETA must be rejected as a non-dataset keyword");
+    if (!throws_ia_with([&] { (void)dataset_definition("BETA"); }, {"BETA"}))
+      throw std::runtime_error("05.1 tests: the parameter BETA must be rejected as a non-dataset keyword");
+  }
+
+  // S3. String-keyed dataset access: same tensors (rank/labels/extents/
+  //     values), the declared symmetries, the cached repeat, and the
+  //     non-dataset failure.
+  {
+    const std::string h5 = (std::filesystem::temp_directory_path() / "cppgw_story05_test.h5").string();
+    if (!std::filesystem::exists(h5)) {
+      // Section B created this fixture; recreate the five GF2 datasets if
+      // it was cleaned up so this section stays self-contained.
+      const size_t N_AO = 24, N_MO = 12, N_RI = 30;
+      HighFive::File hf(h5, HighFive::File::Truncate);
+      auto fill = [](std::vector<double>& v, double base) {
+        for (size_t i = 0; i < v.size(); ++i) v[i] = base + (double)i;
+      };
+      std::vector<double> v;
+      v.assign(N_AO * N_AO, 0.0);     fill(v, 1.0);     hf.createDataSet<double>("hcore", HighFive::DataSpace(std::vector<size_t>{N_AO, N_AO})).write_raw(v.data());
+      v.assign(N_AO * N_MO, 0.0);     fill(v, 100.0);   hf.createDataSet<double>("mo_coeff", HighFive::DataSpace(std::vector<size_t>{N_AO, N_MO})).write_raw(v.data());
+      v.assign(N_RI * N_AO * N_AO, 0.0); fill(v, 1000.0); hf.createDataSet<double>("eri3", HighFive::DataSpace(std::vector<size_t>{N_RI, N_AO, N_AO})).write_raw(v.data());
+      v.assign(N_AO * N_AO, 0.0);     fill(v, 3000.0);  hf.createDataSet<double>("overlap", HighFive::DataSpace(std::vector<size_t>{N_AO, N_AO})).write_raw(v.data());
+      v.assign(N_AO * N_AO, 0.0);     fill(v, 4000.0);  hf.createDataSet<double>("density_matrix", HighFive::DataSpace(std::vector<size_t>{N_AO, N_AO})).write_raw(v.data());
+    }
+    const InputCatalog cat = InputCatalog::from_text(
+        "CALCULATION = GF2\nHCORE = hcore\nMO_COEFF = mo_coeff\nERI3 = eri3\nOVERLAP = overlap\n"
+        "DENSITY_MATRIX = density_matrix\nBETA = 10\nMATSUBARA_HALF_N = 2\nMU = 0\neta = 1e-5\n",
+        h5);
+
+    // Lower-case keyword: case-insensitive access against the same row.
+    const Tensor<double, Executor::Host> dm = cat.require_dataset("density_matrix");
+    const Gf2Input g = cat.require_gf2();
+    if (dm.rank() != g.density_matrix.rank() || dm.dims().size() != g.density_matrix.dims().size())
+      throw std::runtime_error("05.1 tests: require_dataset('density_matrix') has a different rank than the GF2 field");
+    bool same_shape = true, same_values = true;
+    const size_t total = dm.total_elements();
+    for (size_t i = 0; i < dm.dims().size(); ++i)
+      if (dm.dims()[i].label != g.density_matrix.dims()[i].label || dm.dims()[i].dim != g.density_matrix.dims()[i].dim)
+        same_shape = false;
+    const double* a = dm.data();
+    const double* b = g.density_matrix.data();
+    for (size_t i = 0; i < total; ++i) if (a[i] != b[i]) same_values = false;
+    if (!same_shape || !same_values)
+      throw std::runtime_error("05.1 tests: require_dataset('density_matrix') differs from the GF2 density_matrix field");
+    if (!dm.dims()[0].symmetry || dm.dims()[0].symmetry != dm.dims()[1].symmetry)
+      throw std::runtime_error("05.1 tests: density_matrix AO axes must be bound to ONE shared SymGroup");
+    if (dm.dims()[0].symmetry->kind() != SymKind::Hermitian)
+      throw std::runtime_error("05.1 tests: density_matrix AO pair must be a Hermitian family");
+
+    // MO_COEFF: plain axes, ao extent shared with the cached HCORE ao extent.
+    const Tensor<double, Executor::Host> mc = cat.require_dataset("MO_COEFF");
+    if (mc.dims()[0].label != TensorDimLabel("mo") || mc.dims()[1].label != TensorDimLabel("ao"))
+      throw std::runtime_error("05.1 tests: MO_COEFF axes must be {mo, ao}");
+    if (mc.dims()[0].symmetry || mc.dims()[1].symmetry)
+      throw std::runtime_error("05.1 tests: MO_COEFF axes must be plain");
+    const Tensor<double, Executor::Host> hc = cat.require_dataset("HCORE");
+    if (mc.dims()[1].dim != hc.dims()[0].dim)
+      throw std::runtime_error("05.1 tests: MO_COEFF ao extent must equal the cached HCORE ao extent");
+
+    // Cached repeat: element-identical (no HDF5 re-touch, no failure).
+    const Tensor<double, Executor::Host> hc2 = cat.require_dataset("HCORE");
+    for (size_t i = 0; i < hc.total_elements(); ++i)
+      if (hc.data()[i] != hc2.data()[i])
+        throw std::runtime_error("05.1 tests: a cached repeat of require_dataset('HCORE') is not element-identical");
+
+    // A parameter is not a dataset: rejected with the known list.
+    if (!throws_ia_with([&] { (void)cat.require_dataset("ETA"); }, {"ETA", "known datasets"}))
+      throw std::runtime_error("05.1 tests: require_dataset('ETA') must be rejected naming ETA and the known datasets");
+  }
+
+  // S4. Missing-requirement reporting is driven by the GF2 row (parameters
+  //     participate via the row, not a field on the dataset keyword).
+  {
+    if (!throws_ia_with(
+        [&] { (void)parse_input("CALCULATION = GF2\nHCORE = h\nMO_COEFF = m\nERI3 = e\nOVERLAP = s\nDENSITY_MATRIX = p\nBETA = 10\nMATSUBARA_HALF_N = 2\n"); },
+        {"MU", "missing keyword(s): MU"}))
+      throw std::runtime_error("05.1 tests: a missing MU must be reported via the GF2 requirement row");
+    bool mu_in_row = false;
+    for (const std::string& kw : calculation_def(Calc::Gf2).required_parameters)
+      if (kw == "MU") { mu_in_row = true; break; }
+    if (!mu_in_row)
+      throw std::runtime_error("05.1 tests: MU must be a member of the GF2 required_parameters row");
+  }
+
+  // ------------------------------------------------------------------
   //  D. CLI smoke check (manual acceptance, Story-2 style); the in-process
   //     suite already covers the pipeline via A/B/C above.
   // ------------------------------------------------------------------

@@ -8,7 +8,9 @@
 //  object (e.g. via `InputCatalog::require_gf2()`) and never touch input
 //  keywords or HDF5 paths directly.
 //
-//  The tensors are stored exactly as written in the file: the symmetry
+//  The tensors arrive via the catalog's definition-driven loading path
+//  (`InputCatalog::require_dataset`, Story 05.1), which declares each
+//  dataset's axes/symmetries in the dataset-definition table; the symmetry
 //  metadata on their axes is ADVISORY (Story 06) and never alters storage.
 // ============================================================================
 

@@ -173,37 +173,121 @@ std::vector<Assignment> collect_assignments(const std::string& text) {
 const std::vector<KeywordDefinition>& keyword_registry() {
   static const std::vector<KeywordDefinition> registry = {
     {"CALCULATION", ValueKind::String,
-     std::nullopt, /*required_for_gf2=*/false, Sanitize::None,
+     std::nullopt, Sanitize::None,
      "calculation to run (GF2)"},
     {"HCORE", ValueKind::String,
-     std::nullopt, /*required_for_gf2=*/true, Sanitize::None,
+     std::nullopt, Sanitize::None,
      "HDF5 path to the AO x AO core Hamiltonian (rank 2, square)"},
     {"MO_COEFF", ValueKind::String,
-     std::nullopt, /*required_for_gf2=*/true, Sanitize::None,
+     std::nullopt, Sanitize::None,
      "HDF5 path to the AO x MO coefficients (rank 2)"},
     {"ERI3", ValueKind::String,
-     std::nullopt, /*required_for_gf2=*/true, Sanitize::None,
+     std::nullopt, Sanitize::None,
      "HDF5 path to the RI density-fitting tensor, shape (ri, ao, ao) (rank 3)"},
     {"OVERLAP", ValueKind::String,
-     std::nullopt, /*required_for_gf2=*/true, Sanitize::None,
+     std::nullopt, Sanitize::None,
      "HDF5 path to the AO x AO overlap matrix (rank 2, square)"},
     {"DENSITY_MATRIX", ValueKind::String,
-     std::nullopt, /*required_for_gf2=*/true, Sanitize::None,
+     std::nullopt, Sanitize::None,
      "HDF5 path to the AO x AO spin-summed density matrix (rank 2, square)"},
     {"BETA", ValueKind::Double,
-     std::nullopt, /*required_for_gf2=*/true, Sanitize::PositiveFiniteDouble,
+     std::nullopt, Sanitize::PositiveFiniteDouble,
      "positive inverse temperature for the Matsubara grid"},
     {"MATSUBARA_HALF_N", ValueKind::Int,
-     std::nullopt, /*required_for_gf2=*/true, Sanitize::PositiveInt,
+     std::nullopt, Sanitize::PositiveInt,
      "positive number of positive fermionic Matsubara frequencies"},
     {"MU", ValueKind::Double,
-     std::nullopt, /*required_for_gf2=*/true, Sanitize::None,
+     std::nullopt, Sanitize::None,
      "initial chemical potential for the AO Matsubara initial guess"},
     {"ETA", ValueKind::Double,
-     KeywordValue{1e-5}, /*required_for_gf2=*/false, Sanitize::PositiveFiniteDouble,
+     KeywordValue{1e-5}, Sanitize::PositiveFiniteDouble,
      "Green's-function offset/broadening (retained for the GF2 stages that use it)"},
   };
   return registry;
+}
+
+// ----- the calculation registry (per-calculation requirement sets) -----
+// The single source of truth for WHICH keywords each calculation requires.
+// The parser's calculation-name resolution and missing-keyword report are
+// driven by this table; there is no per-calculation bool on the keywords.
+// Row order is the order of the "known calculations" listing in errors.
+const std::vector<CalculationDefinition>& calculation_registry() {
+  static const std::vector<CalculationDefinition> registry = {
+    {
+      Calc::Gf2,
+      "GF2",
+      {"HCORE", "MO_COEFF", "ERI3", "OVERLAP", "DENSITY_MATRIX"},
+      {"BETA", "MATSUBARA_HALF_N", "MU"},
+      {"ETA"},
+    },
+  };
+  return registry;
+}
+
+const CalculationDefinition& calculation_def(Calc calc) {
+  for (const CalculationDefinition& cd : calculation_registry())
+    if (cd.calc == calc)
+      return cd;
+  // A resolved input can never carry Calc::None and a missing row is an
+  // author error: fail loudly, not silently.
+  throw std::logic_error("calculation_def: no calculation definition for calc "
+      + std::to_string(static_cast<int>(calc)));
+}
+
+// ----- the dataset definitions (the single place layouts are declared) -----
+// Complete, authoritative table of dataset keywords: rank (= axes.size()),
+// axis labels FASTEST-to-slowest, the binding kind for the repeated-label
+// family, and the cross-dataset extent reference. The generic loader is
+// driven entirely by these rows.
+const std::vector<DatasetDefinition>& dataset_definitions() {
+  static const std::vector<DatasetDefinition> definitions = {
+    {
+      "HCORE",
+      {DatasetAxisSpec{TensorDimLabel("ao")}, DatasetAxisSpec{TensorDimLabel("ao")}},
+      SymKind::Hermitian,
+      std::nullopt,   // defines the 'ao' reference extent
+      "AO x AO core Hamiltonian (rank 2, square, Hermitian)"},
+    {
+      "MO_COEFF",
+      {DatasetAxisSpec{TensorDimLabel("mo")}, DatasetAxisSpec{TensorDimLabel("ao")}},
+      std::nullopt,   // plain axes
+      "HCORE",
+      "MO x AO coefficients (rank 2, AO extent shared with HCORE)"},
+    {
+      "ERI3",
+      {DatasetAxisSpec{TensorDimLabel("ao")}, DatasetAxisSpec{TensorDimLabel("ao")},
+       DatasetAxisSpec{TensorDimLabel("ri")}},
+      SymKind::Symmetric,
+      "HCORE",
+      "RI density-fitting tensor (rank 3, symmetric AO pair, AO extent shared with HCORE)"},
+    {
+      "OVERLAP",
+      {DatasetAxisSpec{TensorDimLabel("ao")}, DatasetAxisSpec{TensorDimLabel("ao")}},
+      SymKind::Hermitian,
+      "HCORE",
+      "AO x AO overlap matrix (rank 2, square, Hermitian)"},
+    {
+      "DENSITY_MATRIX",
+      {DatasetAxisSpec{TensorDimLabel("ao")}, DatasetAxisSpec{TensorDimLabel("ao")}},
+      SymKind::Hermitian,
+      "HCORE",
+      "AO x AO spin-summed density matrix (rank 2, square, Hermitian)"},
+  };
+  return definitions;
+}
+
+const DatasetDefinition& dataset_definition(const std::string& keyword) {
+  const std::string lk = to_lower(keyword);
+  for (const DatasetDefinition& d : dataset_definitions())
+    if (lk == to_lower(d.keyword))
+      return d;
+  std::string all;
+  for (const DatasetDefinition& d : dataset_definitions()) {
+    if (!all.empty()) all += ", ";
+    all += d.keyword;
+  }
+  throw std::invalid_argument("'" + keyword + "' is not a known dataset keyword "
+      + "(known datasets: " + all + ")");
 }
 
 // ----- ResolvedInput accessors -----
@@ -284,27 +368,44 @@ ResolvedInput parse_input(const std::string& text) {
     first_line[def->keyword] = a.line;
   }
 
-  // Resolve the calculation selector.
+  // Resolve the calculation selector (definition-driven, case-insensitive).
   auto calc_it = values.find("CALCULATION");
   if (calc_it == values.end())
     throw std::invalid_argument("input must select a calculation: the 'CALCULATION' keyword is missing");
   const std::string calc_text = std::get<std::string>(calc_it->second.value);
-  ResolvedInput resolved;
   const std::string low = to_lower(calc_text);
-  if (low == "gf2")
-    resolved.calc = Calc::Gf2;
-  else
+  ResolvedInput resolved;   // calc stays Calc::None until a row matches
+  for (const CalculationDefinition& cd : calculation_registry())
+    if (low == to_lower(cd.name)) {
+      resolved.calc = cd.calc;
+      break;
+    }
+  if (resolved.calc == Calc::None)
     throw std::invalid_argument(line_what(first_line.at("CALCULATION"))
-        + "unrecognized calculation '" + calc_text + "' (known calculations: GF2)");
+        + "unrecognized calculation '" + calc_text + "' (known calculations: "
+        + [&] {
+            std::string all;
+            for (const CalculationDefinition& cd : calculation_registry()) {
+              if (!all.empty()) all += ", ";
+              all += cd.name;
+            }
+            return all;
+          }()
+        + ")");
 
-  // Requirement check for the SELECTED calculation, reported all at once.
-  if (resolved.calc == Calc::Gf2) {
+  // Requirement check for the SELECTED calculation, reported all at once
+  // (datasets list order, then parameters list order).
+  {
+    const CalculationDefinition& cd = calculation_def(resolved.calc);
     std::string missing;
-    for (const auto& def : registry)
-      if (def.required_for_gf2 && values.count(def.keyword) == 0)
-        missing += (missing.empty() ? "" : ", ") + def.keyword;
+    for (const std::string& kw : cd.required_datasets)
+      if (values.count(kw) == 0)
+        missing += (missing.empty() ? "" : ", ") + kw;
+    for (const std::string& kw : cd.required_parameters)
+      if (values.count(kw) == 0)
+        missing += (missing.empty() ? "" : ", ") + kw;
     if (!missing.empty())
-      throw std::invalid_argument("GF2 calculation requires missing keyword(s): " + missing);
+      throw std::invalid_argument(cd.name + " calculation requires missing keyword(s): " + missing);
   }
 
   // Default application (registry-driven, not special-cased here) and
@@ -357,6 +458,172 @@ InputCatalog InputCatalog::from_text(const std::string& text,
         + "' for reading (" + e.what() + ")");
   }
   return catalog;
+}
+
+// ----- generic, definition-driven dataset loading -----
+
+Tensor<double, Executor::Host> InputCatalog::require_dataset(const std::string& keyword) const {
+  // Unknown (or a parameter, not a dataset) keyword fails BEFORE any HDF5
+  // access; the message keeps one source of truth (the table's order).
+  const DatasetDefinition& def = dataset_definition(keyword);
+  auto it = datasets_.find(def.keyword);   // cache keys are CANONICAL
+  if (it != datasets_.end())
+    return it->second;   // cached: no HDF5 re-touch
+  return load_dataset(def, {});
+}
+
+Tensor<double, Executor::Host> InputCatalog::load_dataset(
+    const DatasetDefinition& def,
+    const std::set<std::string>& inflight) const {
+  // Extent-reference cycle (a ref chain that comes back to itself) is an
+  // author error; it is unreachable with the shipped table.
+  if (inflight.count(def.keyword) != 0)
+    throw std::logic_error("dataset extent-reference cycle detected at keyword "
+        + def.keyword);
+
+  std::set<std::string> child_inflight = inflight;
+  child_inflight.insert(def.keyword);
+
+  // Existence: `getDataSet` throws (typically a HighFive error derived from
+  // std::runtime_error) when the path does not name an existing object;
+  // rethrow with keyword context so the message identifies the request.
+  const std::string path = resolved_.get_string(def.keyword);
+  HighFive::DataSet ds;
+  try {
+    ds = file_->getDataSet(path);
+  } catch (const std::exception& e) {
+    throw std::invalid_argument("keyword " + def.keyword + ": HDF5 dataset '" + path
+        + "' does not exist in the data file (" + e.what() + ")");
+  }
+
+  // Element type: float64 only.
+  const HighFive::DataType dt = ds.getDataType();
+  if (!(dt == HighFive::AtomicType<double>())) {
+    throw std::invalid_argument("keyword " + def.keyword + ": HDF5 dataset '" + path
+        + "' must have float64 elements (found " + dt.string()
+        + "); only double-precision datasets are accepted for this calculation");
+  }
+
+  // Rank: the file's rank must equal the number of declared axes.
+  const std::vector<size_t> dims = ds.getDimensions();   // slowest index first
+  const size_t rank = dims.size();
+  if (rank != def.axes.size()) {
+    throw std::invalid_argument("keyword " + def.keyword + ": HDF5 dataset '" + path
+        + "' must have rank " + std::to_string(def.axes.size())
+        + " (found rank " + std::to_string(rank) + ")");
+  }
+
+  // Rendered size list in file order (slowest first), "R x C [x ...]".
+  auto sizes_str = [&dims]() {
+    std::string s;
+    for (size_t f = 0; f < dims.size(); ++f) {
+      if (f) s += " x ";
+      s += std::to_string(dims[f]);
+    }
+    return s;
+  };
+
+  // R1: axes sharing a repeated label must have equal extents (the implicit
+  // squareness rule, generalized to any repeated-label family).
+  {
+    std::string bad_family;
+    for (const DatasetAxisSpec& axis : def.axes) {
+      size_t count = 0;
+      for (const DatasetAxisSpec& other : def.axes)
+        if (other.label == axis.label) ++count;
+      if (count < 2)
+        continue;
+      bool equal = true;
+      size_t first_extent = 0;
+      bool seen = false;
+      for (size_t i = 0; i < def.axes.size() && equal; ++i) {
+        if (def.axes[i].label != axis.label)
+          continue;
+        const size_t e = dims[rank - 1 - i];   // file dims are slowest-first
+        if (!seen) { first_extent = e; seen = true; }
+        else if (e != first_extent)
+          equal = false;
+      }
+      if (!equal) { bad_family = label_to_string(axis.label); break; }
+    }
+    if (!bad_family.empty())
+      throw std::invalid_argument("keyword " + def.keyword + ": HDF5 dataset '" + path
+          + "' must have a square repeated '" + bad_family
+          + "' axis pair (a square " + bad_family + " x " + bad_family
+          + " pair; found " + sizes_str() + ")");
+  }
+
+  // R2: axes whose label also appears in `extent_ref`'s definition must match
+  // the reference dataset's extent for that label (the reference is resolved
+  // through the same loading path, cached or recursive); other labels are
+  // free (e.g. 'mo', 'ri').
+  if (def.extent_ref.has_value()) {
+    const DatasetDefinition& ref = dataset_definition(*def.extent_ref);
+    // Resolve the reference through the same loading path (already cached
+    // if present; load_dataset caches its result either way).
+    if (datasets_.count(*def.extent_ref) == 0) {
+      const auto _ = load_dataset(ref, child_inflight);   // caches under its keyword
+      (void)_;                                            // value unused: extent read from cache below
+    }
+    const Tensor<double, Executor::Host>& ref_t = datasets_.at(*def.extent_ref);
+    for (size_t i = 0; i < def.axes.size(); ++i) {
+      const TensorDimLabel& label = def.axes[i].label;
+      size_t ref_extent = 0;
+      bool shared = false;
+      for (size_t j = 0; j < ref.axes.size(); ++j) {
+        if (ref.axes[j].label == label) { ref_extent = ref_t.dims()[j].dim; shared = true; break; }
+      }
+      if (!shared)
+        continue;
+      const size_t e = dims[rank - 1 - i];
+      if (e != ref_extent) {
+        std::string lbl = label_to_string(label);
+        for (char& c : lbl) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        throw std::invalid_argument("keyword " + def.keyword + ": HDF5 dataset '" + path
+            + "' " + lbl + " extent does not match " + ref.keyword
+            + " (found " + sizes_str() + ", expected " + std::to_string(ref_extent) + ")");
+      }
+    }
+  }
+
+  // Construction: extents fast->slow (file dims are slow->fast); ONE fresh
+  // group (def.symmetry) shared by exactly the repeated-label family, plain
+  // axes elsewhere. Symmetry is declared and constructed here; the dedicated
+  // validation pass is the follow-up story (05.3).
+  std::vector<size_t> extents(def.axes.size());
+  for (size_t i = 0; i < def.axes.size(); ++i)
+    extents[i] = dims[def.axes.size() - 1 - i];
+
+  std::optional<TensorDimLabel> fam;
+  for (const DatasetAxisSpec& axis : def.axes) {
+    size_t count = 0;
+    for (const DatasetAxisSpec& other : def.axes)
+      if (other.label == axis.label) ++count;
+    if (count >= 2) { fam = axis.label; break; }
+  }
+
+  SymGroup group;
+  if (def.symmetry.has_value() && fam.has_value())
+    switch (*def.symmetry) {
+      case SymKind::Symmetric:     group = Symmetric(); break;
+      case SymKind::Hermitian:     group = Hermitian(); break;
+      case SymKind::Antisymmetric: group = Antisymmetric(); break;
+    }
+
+  std::vector<TensorDim> tds;
+  tds.reserve(def.axes.size());
+  for (size_t i = 0; i < def.axes.size(); ++i) {
+    const bool in_family = def.symmetry.has_value() && fam.has_value()
+        && def.axes[i].label == *fam;
+    TensorDim td(def.axes[i].label, extents[i]);
+    if (in_family) td.symmetry = group;
+    tds.push_back(std::move(td));
+  }
+
+  Tensor<double, Executor::Host> t(std::move(tds));
+  ds.read_raw(t.data());   // C-order maps 1:1 to the fast->slow Tensor layout
+  datasets_[def.keyword] = t;   // cache under the CANONICAL spelling
+  return t;
 }
 
 } // namespace cppgw
